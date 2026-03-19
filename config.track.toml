@@ -1,0 +1,57 @@
+[project]
+input = "input"
+output = "output"
+thumbnail_dirname = "thumbnails"
+video_extensions = [".mp4", ".mov", ".m4v", ".avi"]
+
+[sampling]
+sample_fps = 2.0
+forced_keep_interval_seconds = 1.5
+jpeg_quality = 88
+max_frames = 0
+
+[filters]
+min_blur_score = 80.0
+min_frame_diff = 5.0
+min_hash_distance = 5
+
+[ollama]
+enabled = true
+host = "http://127.0.0.1:11434"
+model = "qwen3-vl:8b"
+temperature = 0.1
+timeout_seconds = 120
+
+[prompt]
+positive_labels = [
+  "corner_entry",
+  "apex",
+  "corner_exit",
+  "full_throttle",
+  "high_speed",
+  "late_braking",
+  "handlebar_wobble",
+  "near_barrier",
+]
+negative_labels = [
+  "pit_lane",
+  "cooldown",
+  "formation_lap",
+  "slow_straight",
+  "low_value_track",
+]
+system_instructions = """
+You review a single-lap racetrack riding video from a forward-facing fixed camera.
+Keep only short-form highlight moments with clear racing value.
+Prioritize: aggressive corner entry, visible lean angle, apex clips, corner exit drive, full-throttle acceleration, high-speed sections, late braking, handlebar wobble, and close moments near curbs, tyre walls, or barriers.
+Reject: pit-lane footage, cooldown sections, flat low-value cruising, uneventful straights, and visually repetitive shots.
+Return valid JSON only.
+"""
+
+[decision]
+min_keep_score = 0.7
+merge_gap_seconds = 3.0
+padding_before_seconds = 1.0
+padding_after_seconds = 1.8
+min_segment_seconds = 2.0
+max_reason_chars = 80
