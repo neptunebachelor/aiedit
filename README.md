@@ -1,119 +1,190 @@
-# Local AI Highlight Workflow
+# Local AI Highlight Pipeline
 
-This project is a Windows-first MVP for front-facing riding footage.
+This project builds short highlight videos from forward-facing riding footage.
 
-## What it does
+The product-facing entry point is now cross-platform:
 
-1. Reads forward-fixed `.mp4` footage exported from Insta360 Studio.
-2. Samples frames with OpenCV.
-3. Applies a coarse filter for blur, low-motion, and near-duplicate frames.
-4. Sends candidate frames to a local Ollama vision model.
-5. Writes:
-   - `analysis.json`
-   - `highlights.json`
-   - `highlights.srt`
-
-## Folder layout
-
-```text
-.
-|-- analyze_video.py
-|-- generate_srt.py
-|-- run.ps1
-|-- config.example.toml
-|-- requirements.txt
-|-- input/
-`-- output/
+```bash
+python pipeline.py <stage> ...
 ```
+
+Windows-only wrappers such as `run.ps1` and `run.cmd` are kept only as legacy compatibility helpers.
+
+## Stages
+
+The pipeline is split into four explicit stages:
+
+1. `extract`
+   Turn a video into LLM-ready images.
+2. `infer`
+   Send extracted frames to either a local Ollama model or a third-party API.
+3. `review`
+   Build a reviewable edit plan, source/final SRT files, and an optional preview video.
+4. `render`
+   Cut and concatenate the final MP4 with ffmpeg.
+
+There is also an `edit` utility stage for patching an editable review plan:
+
+- `edit update-segment`
+- `edit update-caption`
 
 ## Setup
 
 1. Install Python 3.12+.
-2. Install Ollama for Windows.
-3. Make sure the Ollama app is running locally.
-4. Pull a vision model, for example `ollama pull qwen3-vl:8b`.
-   If the CLI is not in `PATH`, the analyzer still works as long as the local Ollama API is reachable on `http://127.0.0.1:11434`.
-5. Copy `config.example.toml` to `config.toml`.
-6. Put exported videos into `input/`.
+2. Install the dependencies in `requirements.txt`.
+3. Make sure Ollama is running if you use the local provider.
+4. Put exported videos into `input/`.
+5. Copy `config.example.toml` to `config.toml` if needed.
 
-## Run
+## Quick Start
 
-Preferred on Windows:
+### 1. Extract frames
 
-```cmd
-.\run.cmd
+Road riding:
+
+```bash
+python pipeline.py extract --video ./input/ride01.mp4 --frame-interval-seconds 1.0
 ```
 
-If you want to call the PowerShell script directly, use a one-off execution policy bypass:
+Track laps:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1
+```bash
+python pipeline.py extract --video ./input/lap01.mp4 --config ./config.track.toml --frame-interval-seconds 0.5
 ```
 
-Or process a specific file:
+### 2. Run inference
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1 -InputPath .\input\ride01.mp4
+Local Ollama:
+
+```bash
+python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 ```
 
-Run extraction only, without Ollama:
+OpenAI-compatible provider:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1 -ExtractOnly
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider-type openai_compatible \
+  --api-base https://your-api.example/v1 \
+  --model your-vision-model \
+  --api-key-env OPENAI_API_KEY
 ```
 
-## Output
+### 3. Review and preview
 
-Each video gets its own folder:
-
-```text
-output/
-`-- ride01/
-    |-- analysis.json
-    |-- highlights.json
-    |-- highlights.srt
-    `-- thumbnails/
-```
-
-Use `highlights.srt` in CapCut/Jianying as timeline anchors.
-
-## Trim To 30 Seconds
-
-After analysis, you can build a tighter 30-second cut plan from `analysis.json`:
-
-```powershell
-python .\render_highlights.py `
-  --input .\output\ride01\analysis.json `
-  --target-seconds 30 `
-  --stem highlights_30s
+```bash
+python pipeline.py review \
+  --input ./output/lap01/analysis.json \
+  --target-seconds 30 \
+  --caption-mode human \
+  --preview \
+  --preview-resolution 720p
 ```
 
 This writes:
 
 ```text
-output/ride01/
-|-- highlights_30s.json
-|-- highlights_30s.srt
-`-- highlights_30s_source.srt
+output/lap01/
+|-- highlights_30s.review.json
+|-- highlights_30s.editable.json
+|-- highlights_30s.final.srt
+|-- highlights_30s.source.srt
+`-- highlights_30s.preview.mp4
 ```
 
-The script splits long highlight runs into shorter clip candidates, ranks them, and keeps the best non-overlapping clips until it reaches the target total duration.
+Preview resolutions:
 
-`analysis.json` is the preferred input because it contains `source_timestamps`, which lets the script split long highlight runs more intelligently than plain SRT.
-`highlights_30s.srt` is rebased to the final 30-second timeline, while `highlights_30s_source.srt` keeps the original source-video timestamps for manual cutting on the full clip.
+- `540p`
+- `720p`
+- `1080p`
+- `source`
 
-## Render Final MP4
+### 4. Patch the plan if needed
 
-If `ffmpeg.exe` is available, the same script can cut and concatenate the final video automatically:
+Change a source cut:
 
-```powershell
-python .\render_highlights.py `
-  --input .\output\ride01\analysis.json `
-  --target-seconds 30 `
-  --stem highlights_30s `
-  --render `
-  --ffmpeg C:\path\to\ffmpeg.exe
+```bash
+python pipeline.py edit update-segment \
+  --plan ./output/lap01/highlights_30s.editable.json \
+  --rank 3 \
+  --source-start-seconds 150.2 \
+  --source-end-seconds 153.2
 ```
 
-If `ffmpeg` is already in `PATH`, you can omit `--ffmpeg`.
-Use `--max-clips-per-source-segment 0` if you want to disable the built-in diversity limit and allow more clips from the same long highlight section.
+Change subtitle text:
+
+```bash
+python pipeline.py edit update-caption \
+  --plan ./output/lap01/highlights_30s.editable.json \
+  --rank 3 \
+  --caption "Handlebar wobble starts here." \
+  --caption-detail "Close to the tyre wall."
+```
+
+### 5. Render the final video
+
+```bash
+python pipeline.py render \
+  --input ./output/lap01/highlights_30s.editable.json \
+  --stem lap01_final \
+  --resolution source
+```
+
+Or render a lower-resolution deliverable:
+
+```bash
+python pipeline.py render \
+  --input ./output/lap01/highlights_30s.editable.json \
+  --stem lap01_final_720p \
+  --resolution 720p
+```
+
+## Configuration
+
+The config now supports both the original legacy sections and the new pipeline sections:
+
+- `project`
+- `sampling` and `extract`
+- `filters`
+- `ollama` and `provider`
+- `prompt`
+- `decision` and `selection`
+- `review`
+- `preview`
+- `render`
+
+Key user-facing knobs:
+
+- frame interval or sample FPS
+- provider type and model
+- API base URL and API key
+- target highlight duration
+- clip length limits
+- preview resolution
+- final render resolution
+
+## Outputs
+
+Typical stage outputs look like this:
+
+```text
+output/lap01/
+|-- extract/
+|   |-- frames/
+|   `-- index.json
+|-- analysis.json
+|-- frame_decisions.jsonl
+|-- segments.raw.json
+|-- segments.raw.srt
+|-- highlights_30s.review.json
+|-- highlights_30s.editable.json
+|-- highlights_30s.final.srt
+|-- highlights_30s.source.srt
+|-- highlights_30s.preview.mp4
+`-- lap01_final.mp4
+```
+
+## More
+
+See `WORKFLOW.md` for the full stage-by-stage workflow.

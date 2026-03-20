@@ -1,0 +1,277 @@
+# Workflow
+
+This project now uses a cross-platform Python pipeline instead of a Windows-only workflow wrapper.
+
+The main entry point is:
+
+```bash
+python pipeline.py <stage> ...
+```
+
+## Overview
+
+There are four primary stages:
+
+1. `extract`
+2. `infer`
+3. `review`
+4. `render`
+
+And one utility stage:
+
+5. `edit`
+
+## Stage 1: Extract
+
+Goal:
+
+- turn a video into LLM-readable image files
+- keep only candidate frames after the coarse blur / motion / duplicate gates
+
+Primary inputs:
+
+- `--video`
+- `--frame-interval-seconds`
+- `--sample-fps`
+- `--max-frames`
+- `--resize-for-llm`
+- `--config`
+
+Examples:
+
+```bash
+python pipeline.py extract --video ./input/ride01.mp4 --frame-interval-seconds 1.0
+```
+
+```bash
+python pipeline.py extract --video ./input/lap01.mp4 --config ./config.track.toml --frame-interval-seconds 0.5
+```
+
+Outputs:
+
+```text
+output/<video_stem>/
+`-- extract/
+    |-- frames/
+    `-- index.json
+```
+
+`index.json` contains:
+
+- sampled frame timestamps
+- blur / diff / duplicate metrics
+- whether each sampled frame is a candidate
+- the saved image path for each candidate frame
+
+## Stage 2: Infer
+
+Goal:
+
+- call a vision model on extracted frames
+- turn frame-level decisions into merged source-time segments
+
+Supported provider types:
+
+- `ollama`
+- `openai_compatible`
+
+Primary inputs:
+
+- `--video`
+- `--extract-index`
+- `--provider-type`
+- `--api-base`
+- `--api-key`
+- `--api-key-env`
+- `--model`
+- `--config`
+
+Examples:
+
+```bash
+python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
+```
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider-type openai_compatible \
+  --api-base https://your-api.example/v1 \
+  --model your-vision-model \
+  --api-key-env OPENAI_API_KEY
+```
+
+Outputs:
+
+```text
+output/<video_stem>/
+|-- analysis.json
+|-- frame_decisions.jsonl
+|-- segments.raw.json
+|-- segments.raw.srt
+|-- highlights.json
+`-- highlights.srt
+```
+
+`segments.raw.srt` stays on the original source-video timeline.
+
+## Stage 3: Review
+
+Goal:
+
+- compress the raw highlight segments into a shorter candidate edit
+- emit files that humans can review and modify
+- optionally render a low-resolution preview video
+
+Primary inputs:
+
+- `--input`
+- `--target-seconds`
+- `--caption-mode`
+- `--preview`
+- `--preview-resolution`
+- `--config`
+
+Caption modes:
+
+- `score`
+- `reason`
+- `human`
+
+Preview resolutions:
+
+- `540p`
+- `720p`
+- `1080p`
+- `source`
+
+Example:
+
+```bash
+python pipeline.py review \
+  --input ./output/lap01/analysis.json \
+  --target-seconds 30 \
+  --caption-mode human \
+  --preview \
+  --preview-resolution 540p
+```
+
+Outputs:
+
+```text
+output/<video_stem>/
+|-- highlights_30s.review.json
+|-- highlights_30s.editable.json
+|-- highlights_30s.final.srt
+|-- highlights_30s.source.srt
+`-- highlights_30s.preview.mp4
+```
+
+Semantics:
+
+- `*.final.srt` is rebased to the compact final timeline
+- `*.source.srt` stays on the original source timeline
+- `*.editable.json` is the file meant for user intervention
+
+## Stage 4: Render
+
+Goal:
+
+- cut and concatenate the final MP4 from the reviewed edit plan
+
+Primary inputs:
+
+- `--input`
+- `--stem`
+- `--resolution`
+- `--ffmpeg`
+- `--config`
+
+Render resolutions:
+
+- `source`
+- `540p`
+- `720p`
+- `1080p`
+
+Examples:
+
+```bash
+python pipeline.py render \
+  --input ./output/lap01/highlights_30s.editable.json \
+  --stem lap01_final \
+  --resolution source
+```
+
+```bash
+python pipeline.py render \
+  --input ./output/lap01/highlights_30s.editable.json \
+  --stem lap01_final_720p \
+  --resolution 720p
+```
+
+Outputs:
+
+```text
+output/<video_stem>/
+|-- lap01_final.json
+|-- lap01_final.final.srt
+|-- lap01_final.source.srt
+|-- lap01_final.mp4
+`-- lap01_final_parts/
+```
+
+## Stage 5: Edit
+
+Goal:
+
+- patch the editable plan without opening the JSON manually
+
+Supported actions:
+
+- `update-segment`
+- `update-caption`
+
+Update segment timing:
+
+```bash
+python pipeline.py edit update-segment \
+  --plan ./output/lap01/highlights_30s.editable.json \
+  --rank 3 \
+  --source-start-seconds 150.2 \
+  --source-end-seconds 153.2
+```
+
+Update caption text:
+
+```bash
+python pipeline.py edit update-caption \
+  --plan ./output/lap01/highlights_30s.editable.json \
+  --rank 3 \
+  --caption "Handlebar wobble starts here." \
+  --caption-detail "Close to the tyre wall."
+```
+
+The editable plan is designed to support the common review loop:
+
+- rerun the whole review stage
+- modify a segment
+- modify subtitles
+
+## Recommended Review Loop
+
+1. Run `extract`
+2. Run `infer`
+3. Run `review` with preview enabled
+4. Inspect `*.source.srt` and `*.preview.mp4`
+5. Patch `*.editable.json` with `edit`
+6. Run `render`
+
+## Legacy Wrappers
+
+The following files still exist for backwards compatibility on Windows:
+
+- `run.ps1`
+- `run.cmd`
+
+They are not the preferred delivery interface. Use `pipeline.py` for anything meant to be portable across Windows, macOS, Linux, or server environments.

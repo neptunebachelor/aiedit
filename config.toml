@@ -56,3 +56,44 @@ padding_before_seconds = 1.5
 padding_after_seconds = 2.5
 min_segment_seconds = 2.0
 max_reason_chars = 80
+
+[extract]
+frame_interval_seconds = 1.0
+resize_for_llm = 1280
+
+[provider]
+type = "ollama"
+enabled = true
+temperature = 0.1
+timeout_seconds = 120
+
+[provider.ollama]
+api_base = "http://127.0.0.1:11434"
+model = "qwen3-vl:8b"
+
+[provider.openai_compatible]
+api_base = ""
+model = ""
+api_key = ""
+api_key_env = "OPENAI_API_KEY"
+
+[review]
+target_seconds = 30.0
+clip_before = 1.0
+clip_after = 2.0
+cluster_gap = 2.0
+min_clip_seconds = 2.0
+max_clip_seconds = 6.0
+max_clips_per_source_segment = 2
+caption_mode = "human"
+
+[preview]
+enabled = false
+resolution = "720p"
+crf = 28
+preset = "veryfast"
+
+[render]
+resolution = "source"
+crf = 18
+preset = "fast"

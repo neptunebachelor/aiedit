@@ -542,6 +542,12 @@ def find_ffmpeg(ffmpeg_override: str | None) -> str:
             return str(path.resolve())
         raise FileNotFoundError(f"ffmpeg executable not found: {path}")
 
+    local_tools_dir = Path(__file__).resolve().parent / ".tools" / "ffmpeg"
+    if local_tools_dir.exists():
+        local_matches = sorted(local_tools_dir.rglob("ffmpeg.exe"))
+        if local_matches:
+            return str(local_matches[0].resolve())
+
     detected = shutil.which("ffmpeg")
     if detected:
         return detected
@@ -560,6 +566,7 @@ def render_video(
     clips: list[dict[str, Any]],
     preset: str,
     crf: int,
+    scale_height: int | None = None,
 ) -> None:
     temp_dir = output_video.parent / f"{output_video.stem}_parts"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -582,6 +589,14 @@ def render_video(
                 "0:v:0",
                 "-map",
                 "0:a?",
+                *(
+                    [
+                        "-vf",
+                        f"scale=-2:{int(scale_height)}:flags=lanczos",
+                    ]
+                    if scale_height and scale_height > 0
+                    else []
+                ),
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -608,8 +623,10 @@ def render_video(
             "0",
             "-i",
             str(concat_list_path.name),
-            "-c",
+            "-c:v",
             "copy",
+            "-c:a",
+            "aac",
             "-movflags",
             "+faststart",
             str(output_video),
