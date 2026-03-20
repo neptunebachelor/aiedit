@@ -1,66 +1,64 @@
-# Local AI Highlight Pipeline
+# 本地 AI 高光视频流水线
 
-This project builds short highlight videos from forward-facing riding footage.
+这个项目用于从前向视角的骑行视频中自动生成短高光视频。
 
-Chinese version: `README.zh-CN.md`
-
-The product-facing entry point is cross-platform:
+正式入口是跨平台的：
 
 ```bash
 python pipeline.py <stage> ...
 ```
 
-## Stages
+## 阶段说明
 
-The pipeline is split into four explicit stages:
+整个流水线拆分为 4 个明确阶段：
 
 1. `extract`
-   Turn a video into LLM-ready images.
+   将视频转换为适合 LLM 识别的图片。
 2. `infer`
-   Send extracted frames to either a local Ollama model or a third-party API.
+   将抽出的帧发送给本地 Ollama 模型或第三方 API 做识别。
 3. `review`
-   Build a reviewable edit plan, source/final SRT files, and an optional preview video.
+   生成可审阅的剪辑方案、source/final 两套 SRT，以及可选的预览视频。
 4. `render`
-   Cut and concatenate the final MP4 with ffmpeg.
+   使用 ffmpeg 裁剪并拼接最终 MP4。
 
-There is also an `edit` utility stage for patching an editable review plan:
+另外还提供一个 `edit` 工具阶段，用于修改可编辑的审阅方案：
 
 - `edit update-segment`
 - `edit update-caption`
 
-## Setup
+## 环境准备
 
-1. Install Python 3.12+.
-2. Install the dependencies in `requirements.txt`.
-3. Make sure Ollama is running if you use the local provider.
-4. Put exported videos into `input/`.
-5. Copy `config.example.toml` to `config.toml` if needed.
+1. 安装 Python 3.12 及以上版本。
+2. 安装 `requirements.txt` 中的依赖。
+3. 如果你使用本地 provider，请确保 Ollama 正在运行。
+4. 将导出的视频放入 `input/` 目录。
+5. 如果需要，先复制 `config.example.toml` 为 `config.toml`。
 
-## Quick Start
+## 快速开始
 
-### 1. Extract frames
+### 1. 抽帧
 
-Road riding:
+普通道路骑行：
 
 ```bash
 python pipeline.py extract --video ./input/ride01.mp4 --frame-interval-seconds 1.0
 ```
 
-Track laps:
+赛道视频：
 
 ```bash
 python pipeline.py extract --video ./input/lap01.mp4 --config ./config.track.toml --frame-interval-seconds 0.5
 ```
 
-### 2. Run inference
+### 2. 运行识别
 
-Local Ollama:
+本地 Ollama：
 
 ```bash
 python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 ```
 
-OpenAI-compatible provider:
+兼容 OpenAI 的第三方 provider：
 
 ```bash
 python pipeline.py infer \
@@ -71,7 +69,7 @@ python pipeline.py infer \
   --api-key-env OPENAI_API_KEY
 ```
 
-### 3. Review and preview
+### 3. 审阅并生成预览
 
 ```bash
 python pipeline.py review \
@@ -82,7 +80,7 @@ python pipeline.py review \
   --preview-resolution 720p
 ```
 
-This writes:
+这一步会输出：
 
 ```text
 output/lap01/
@@ -93,16 +91,16 @@ output/lap01/
 `-- highlights_30s.preview.mp4
 ```
 
-Preview resolutions:
+预览分辨率支持：
 
 - `540p`
 - `720p`
 - `1080p`
 - `source`
 
-### 4. Patch the plan if needed
+### 4. 按需修正方案
 
-Change a source cut:
+修改原视频中的切点：
 
 ```bash
 python pipeline.py edit update-segment \
@@ -112,7 +110,7 @@ python pipeline.py edit update-segment \
   --source-end-seconds 153.2
 ```
 
-Change subtitle text:
+修改字幕文本：
 
 ```bash
 python pipeline.py edit update-caption \
@@ -122,7 +120,9 @@ python pipeline.py edit update-caption \
   --caption-detail "Close to the tyre wall."
 ```
 
-### 5. Render the final video
+### 5. 渲染最终视频
+
+输出原始分辨率成片：
 
 ```bash
 python pipeline.py render \
@@ -131,7 +131,7 @@ python pipeline.py render \
   --resolution source
 ```
 
-Or render a lower-resolution deliverable:
+也可以输出较低分辨率的交付版本：
 
 ```bash
 python pipeline.py render \
@@ -140,33 +140,33 @@ python pipeline.py render \
   --resolution 720p
 ```
 
-## Configuration
+## 配置说明
 
-The config now supports both the original legacy sections and the new pipeline sections:
+配置文件现在同时兼容原来的 legacy 段落和新的 pipeline 段落：
 
 - `project`
-- `sampling` and `extract`
+- `sampling` 和 `extract`
 - `filters`
-- `ollama` and `provider`
+- `ollama` 和 `provider`
 - `prompt`
-- `decision` and `selection`
+- `decision` 和 `selection`
 - `review`
 - `preview`
 - `render`
 
-Key user-facing knobs:
+用户最常调整的参数包括：
 
-- frame interval or sample FPS
-- provider type and model
-- API base URL and API key
-- target highlight duration
-- clip length limits
-- preview resolution
-- final render resolution
+- 抽帧间隔或 sample FPS
+- provider 类型和模型名
+- API Base URL 和 API Key
+- 目标高光总时长
+- 单段片段时长限制
+- 预览分辨率
+- 最终渲染分辨率
 
-## Outputs
+## 输出文件
 
-Typical stage outputs look like this:
+典型输出目录如下：
 
 ```text
 output/lap01/
@@ -185,6 +185,6 @@ output/lap01/
 `-- lap01_final.mp4
 ```
 
-## More
+## 更多说明
 
-See `WORKFLOW.md` for the full stage-by-stage workflow.
+完整的分阶段工作流请参考 `WORKFLOW.md`。

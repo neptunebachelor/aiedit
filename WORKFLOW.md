@@ -267,11 +267,4 @@ The editable plan is designed to support the common review loop:
 5. Patch `*.editable.json` with `edit`
 6. Run `render`
 
-## Legacy Wrappers
-
-The following files still exist for backwards compatibility on Windows:
-
-- `run.ps1`
-- `run.cmd`
-
-They are not the preferred delivery interface. Use `pipeline.py` for anything meant to be portable across Windows, macOS, Linux, or server environments.
+Use `pipeline.py` for anything meant to be portable across Windows, macOS, Linux, or server environments.
