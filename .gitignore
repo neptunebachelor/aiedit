@@ -2,5 +2,9 @@
 __pycache__/
 *.pyc
 .tools/
+.env
+.env.example
 input/
 output/
+output_gemini/
+deepseek_v3_tokenizer.zip
