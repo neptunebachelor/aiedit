@@ -22,7 +22,6 @@
     }
 
     * { box-sizing: border-box; }
-    button, input, textarea { font: inherit; }
     body {
       margin: 0;
       font-family: Inter, "Segoe UI", Roboto, "PingFang SC", "Noto Sans SC", sans-serif;
@@ -54,7 +53,6 @@
       align-items: center;
       gap: 16px;
       font-size: 15px;
-      min-width: 0;
     }
 
     .divider {
@@ -80,18 +78,6 @@
       box-shadow: 0 0 10px rgba(82, 211, 116, 0.8);
     }
 
-    .status[data-state="dirty"] { color: #ffd97d; }
-    .status[data-state="dirty"]::before {
-      background: #efbb3a;
-      box-shadow: 0 0 10px rgba(239, 187, 58, 0.72);
-    }
-
-    .status[data-state="export"] { color: #9ed3ff; }
-    .status[data-state="export"]::before {
-      background: var(--accent);
-      box-shadow: 0 0 10px rgba(73, 167, 255, 0.72);
-    }
-
     .actions {
       display: flex;
       align-items: center;
@@ -106,14 +92,8 @@
       padding: 12px 18px;
       font-size: 14px;
       font-weight: 700;
-      cursor: pointer;
+      cursor: default;
       box-shadow: var(--shadow);
-      transition: transform 120ms ease, border-color 140ms ease, opacity 140ms ease;
-    }
-
-    .btn:hover {
-      transform: translateY(-1px);
-      border-color: #48536a;
     }
 
     .btn.primary { background: linear-gradient(180deg, #3b78ff, #2b60d0); }
@@ -473,158 +453,6 @@
       box-shadow: 0 0 0 4px rgba(255,255,255,0.08);
     }
 
-    .list {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .item {
-      width: 100%;
-      background: transparent;
-      text-align: left;
-      cursor: pointer;
-      transition: background 140ms ease, border-color 140ms ease, opacity 140ms ease, transform 120ms ease;
-    }
-
-    .item + .item { margin-top: 0; }
-    .item:hover { transform: translateY(-1px); }
-    .item.deleted {
-      opacity: 0.56;
-      border-color: rgba(213, 75, 75, 0.28);
-    }
-
-    .list-copy {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-width: 0;
-    }
-
-    .list-text {
-      min-width: 0;
-    }
-
-    .list-title,
-    .list-subline {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .list-title {
-      display: block;
-      font-weight: 700;
-    }
-
-    .list-subline {
-      display: block;
-      margin-top: 3px;
-      font-size: 12px;
-      color: var(--muted);
-    }
-
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 54px;
-      padding: 4px 8px;
-      border-radius: 999px;
-      font-size: 11px;
-      font-weight: 800;
-      letter-spacing: 0.05em;
-      border: 1px solid rgba(255,255,255,0.08);
-    }
-
-    .pill.keep {
-      background: rgba(57, 179, 108, 0.16);
-      color: #9ce1b5;
-      border-color: rgba(57, 179, 108, 0.26);
-    }
-
-    .pill.delete {
-      background: rgba(213, 75, 75, 0.16);
-      color: #f4b0b0;
-      border-color: rgba(213, 75, 75, 0.26);
-    }
-
-    .pill.neutral {
-      background: rgba(255,255,255,0.05);
-      color: #d6dceb;
-    }
-
-    .video-badge {
-      position: absolute;
-      top: 18px;
-      left: 18px;
-      z-index: 1;
-      padding: 7px 12px;
-      border-radius: 999px;
-      border: 1px solid rgba(255,255,255,0.16);
-      background: rgba(15, 18, 24, 0.7);
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      box-shadow: var(--shadow);
-    }
-
-    .video-frame.deleted {
-      filter: grayscale(0.2);
-    }
-
-    .control {
-      cursor: pointer;
-      transition: transform 120ms ease, border-color 140ms ease;
-    }
-
-    .control:hover {
-      transform: translateY(-1px);
-      border-color: #4b556a;
-    }
-
-    .btn.keep.active {
-      border-color: rgba(57, 179, 108, 0.4);
-      background: linear-gradient(180deg, #3ca75d, #2d8447);
-    }
-
-    .btn.delete.active {
-      border-color: rgba(213, 75, 75, 0.4);
-      background: linear-gradient(180deg, #d55050, #b33b3b);
-    }
-
-    .clip {
-      padding: 0 10px;
-      cursor: pointer;
-      transition: transform 120ms ease, box-shadow 140ms ease, opacity 140ms ease, filter 140ms ease;
-    }
-
-    .clip:hover {
-      transform: translateY(-1px);
-    }
-
-    .clip.active {
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 2px rgba(255,255,255,0.22);
-    }
-
-    .clip.deleted {
-      opacity: 0.45;
-      filter: grayscale(0.26);
-      border-style: dashed;
-    }
-
-    .clip.subtitle-segment {
-      top: 16px;
-      height: 24px;
-      font-size: 11px;
-      background: linear-gradient(180deg, #4dac66, #347e4d);
-    }
-
-    .clip.subtitle-segment.deleted {
-      background: linear-gradient(180deg, #7e5050, #573333);
-    }
-
     @media (max-width: 1280px) {
       .main { grid-template-columns: 240px 1fr 280px; }
       .track-labels { display: none; }
@@ -636,15 +464,15 @@
   <div class="app">
     <header class="topbar">
       <div class="title-row">
-        <strong id="project-title" style="font-size: 18px;">Project: Racing Highlights</strong>
+        <strong style="font-size: 18px;">Project: Racing Highlights</strong>
         <div class="divider"></div>
-        <span id="reviewing-label">Reviewing: Highlight Clip 03</span>
+        <span>Reviewing: Highlight Clip 03</span>
       </div>
       <div class="actions">
-        <div class="status" id="status-indicator" data-state="saved">Autosaved</div>
-        <button class="btn" id="regenerate-btn" type="button">Regenerate</button>
-        <button class="btn" id="save-btn" type="button">Save Changes</button>
-        <button class="btn primary" id="export-btn" type="button">Export</button>
+        <div class="status">Autosaved</div>
+        <button class="btn">Regenerate</button>
+        <button class="btn">Save Changes</button>
+        <button class="btn primary">Export</button>
       </div>
     </header>
 
@@ -662,7 +490,7 @@
 
         <section class="block">
           <h3>AI Results</h3>
-          <div class="list" id="results-list">
+          <div class="list">
             <div class="item active"><div class="left"><span class="icon">▶</span>Overtake Clip</div></div>
             <div class="item"><div class="left"><span class="icon">▶</span>Action Moment</div></div>
           </div>
@@ -670,7 +498,7 @@
 
         <section class="block">
           <h3>Highlight Clips</h3>
-          <div class="list" id="clip-list">
+          <div class="list">
             <div class="item"><div class="left"><span class="icon">▶</span>Clip 01</div></div>
             <div class="item"><div class="left"><span class="icon">▶</span>Clip 02</div></div>
             <div class="item active"><div class="left"><span class="icon">▶</span>Clip 03</div></div>
@@ -680,13 +508,12 @@
 
       <section class="viewer panel">
         <div class="viewer-shell">
-          <div class="video-frame" id="video-frame">
-            <div class="video-badge" id="video-badge">Overtake Clip</div>
+          <div class="video-frame">
             <div class="road"></div>
             <div class="lane"></div>
             <div class="scrim"></div>
             <div class="hud">
-              <div class="subtitle" id="subtitle-preview">I lean into the turn and accelerate past him!</div>
+              <div class="subtitle">I lean into the turn and accelerate past him!</div>
             </div>
           </div>
 
@@ -709,14 +536,14 @@
         <section class="block">
           <h3>Clip Info</h3>
           <div class="padded">
-            <div id="clip-title" style="font-size: 28px; font-weight: 800; margin-bottom: 4px;">Highlight Clip 03</div>
+            <div style="font-size: 28px; font-weight: 800; margin-bottom: 4px;">Highlight Clip 03</div>
           </div>
         </section>
 
         <section class="block">
           <h3>AI Tags</h3>
           <div class="padded">
-            <div class="tag-group" id="tag-group">
+            <div class="tag-group">
               <div class="tag">Overtake</div>
               <div class="tag">High Speed</div>
               <div class="tag">Onboard View</div>
@@ -725,18 +552,18 @@
         </section>
 
         <section class="block">
-          <div class="padded score"><span>Score:</span><strong id="score-value">8.7</strong></div>
+          <div class="padded score"><span>Score:</span><strong>8.7</strong></div>
         </section>
 
         <section class="block">
           <h3>Subtitle</h3>
           <div class="padded">
-            <textarea class="textarea" id="subtitle-input">I lean into the turn and accelerate past him!</textarea>
-            <div class="field-row"><label for="start-input">Start Time</label><input class="input" id="start-input" value="00:02:15" /></div>
-            <div class="field-row"><label for="end-input">End Time</label><input class="input" id="end-input" value="00:02:30" /></div>
+            <textarea class="textarea">I lean into the turn and accelerate past him!</textarea>
+            <div class="field-row"><label>Start Time</label><input class="input" value="00:02:15" /></div>
+            <div class="field-row"><label>End Time</label><input class="input" value="00:02:30" /></div>
             <div class="decision-row">
-              <button class="btn keep" id="keep-btn" type="button">Keep</button>
-              <button class="btn delete" id="delete-btn" type="button">Delete</button>
+              <button class="btn keep">Keep</button>
+              <button class="btn delete">Delete</button>
             </div>
           </div>
         </section>
@@ -760,16 +587,16 @@
             </div>
           </div>
 
-          <div class="track" id="tag-track">
+          <div class="track">
             <div class="clip purple" style="left: 2%; width: 10%;">OVERTAKE</div>
             <div class="clip blue" style="left: 14%; width: 16%;">ACTION</div>
           </div>
 
-          <div class="track" id="subtitle-track">
+          <div class="track">
             <div class="clip green" style="left: 16%; width: 42%;"></div>
           </div>
 
-          <div class="track" id="highlight-track">
+          <div class="track">
             <div class="clip yellow" style="left: 16%; width: 17%;">Clip 01</div>
             <div class="clip red" style="left: 34%; width: 20%;">Clip 02</div>
             <div class="clip pink" style="left: 55%; width: 14%;">Clip 03</div>
@@ -779,307 +606,10 @@
             <div class="waveform"></div>
           </div>
 
-          <div class="playhead" id="playhead"></div>
+          <div class="playhead"></div>
         </div>
       </div>
     </section>
   </div>
-  <script>
-    const state = {
-      activeClipId: "clip-03",
-      dirty: false,
-      results: [
-        { id: "overtake", name: "Overtake Clip", shortLabel: "OVERTAKE", trackClass: "purple" },
-        { id: "action", name: "Action Moment", shortLabel: "ACTION", trackClass: "blue" }
-      ],
-      clips: [
-        {
-          id: "clip-01",
-          label: "Clip 01",
-          title: "Highlight Clip 01",
-          resultId: "overtake",
-          subtitle: "I send it down the inside and come out ahead.",
-          alternatives: [
-            "I send it down the inside and come out ahead.",
-            "Late on the brakes, I squeeze through and take the spot.",
-            "One clean dive, one clean pass, and the corner is mine."
-          ],
-          start: "00:00:42",
-          end: "00:00:55",
-          score: 9.1,
-          tags: ["Late Brake", "Position Gain", "Crowd Pop"],
-          decision: "keep",
-          left: 16,
-          width: 17,
-          highlightClass: "yellow"
-        },
-        {
-          id: "clip-02",
-          label: "Clip 02",
-          title: "Highlight Clip 02",
-          resultId: "action",
-          subtitle: "The rear steps out, but I catch it and stay flat.",
-          alternatives: [
-            "The rear steps out, but I catch it and stay flat.",
-            "The car snaps loose for a second and I hold onto it.",
-            "It starts to slide, I catch the drift, and the run survives."
-          ],
-          start: "00:01:21",
-          end: "00:01:38",
-          score: 8.3,
-          tags: ["Action Moment", "Car Control", "Onboard"],
-          decision: "keep",
-          left: 34,
-          width: 20,
-          highlightClass: "red"
-        },
-        {
-          id: "clip-03",
-          label: "Clip 03",
-          title: "Highlight Clip 03",
-          resultId: "overtake",
-          subtitle: "I lean into the turn and accelerate past him!",
-          alternatives: [
-            "I lean into the turn and accelerate past him!",
-            "The exit hooks up perfectly and I drive by on power.",
-            "I stay planted through the apex and blast straight past."
-          ],
-          start: "00:02:15",
-          end: "00:02:30",
-          score: 8.7,
-          tags: ["Overtake", "High Speed", "Onboard View"],
-          decision: "keep",
-          left: 55,
-          width: 14,
-          highlightClass: "pink"
-        }
-      ]
-    };
-
-    const elements = {
-      reviewingLabel: document.getElementById("reviewing-label"),
-      statusIndicator: document.getElementById("status-indicator"),
-      resultsList: document.getElementById("results-list"),
-      clipList: document.getElementById("clip-list"),
-      videoFrame: document.getElementById("video-frame"),
-      videoBadge: document.getElementById("video-badge"),
-      subtitlePreview: document.getElementById("subtitle-preview"),
-      clipTitle: document.getElementById("clip-title"),
-      tagGroup: document.getElementById("tag-group"),
-      scoreValue: document.getElementById("score-value"),
-      subtitleInput: document.getElementById("subtitle-input"),
-      startInput: document.getElementById("start-input"),
-      endInput: document.getElementById("end-input"),
-      keepButton: document.getElementById("keep-btn"),
-      deleteButton: document.getElementById("delete-btn"),
-      tagTrack: document.getElementById("tag-track"),
-      subtitleTrack: document.getElementById("subtitle-track"),
-      highlightTrack: document.getElementById("highlight-track"),
-      playhead: document.getElementById("playhead"),
-      saveButton: document.getElementById("save-btn"),
-      regenerateButton: document.getElementById("regenerate-btn"),
-      exportButton: document.getElementById("export-btn")
-    };
-
-    function getClip(clipId) {
-      return state.clips.find((clip) => clip.id === clipId);
-    }
-
-    function getResult(resultId) {
-      return state.results.find((result) => result.id === resultId);
-    }
-
-    function getActiveClip() {
-      return getClip(state.activeClipId);
-    }
-
-    function setStatus(text, kind) {
-      elements.statusIndicator.textContent = text;
-      elements.statusIndicator.dataset.state = kind;
-    }
-
-    function markDirty(text) {
-      state.dirty = true;
-      setStatus(text || "Unsaved changes", "dirty");
-    }
-
-    function renderResults() {
-      elements.resultsList.innerHTML = state.results.map((result) => {
-        const relatedClips = state.clips.filter((clip) => clip.resultId === result.id);
-        const active = getActiveClip().resultId === result.id ? " active" : "";
-        return `
-          <button class="item${active}" type="button" data-result-id="${result.id}">
-            <div class="left">
-              <span class="icon">AI</span>
-              <div class="list-text">
-                <span class="list-title">${result.name}</span>
-                <span class="list-subline">${relatedClips.map((clip) => clip.label).join(" / ")}</span>
-              </div>
-            </div>
-            <span class="pill neutral">${relatedClips.length}</span>
-          </button>
-        `;
-      }).join("");
-    }
-
-    function renderClipList() {
-      elements.clipList.innerHTML = state.clips.map((clip) => {
-        const active = clip.id === state.activeClipId ? " active" : "";
-        const deleted = clip.decision === "delete" ? " deleted" : "";
-        const decisionClass = clip.decision === "delete" ? "delete" : "keep";
-        const decisionLabel = clip.decision === "delete" ? "DROP" : "KEEP";
-        return `
-          <button class="item${active}${deleted}" type="button" data-clip-id="${clip.id}">
-            <div class="left">
-              <span class="icon">V</span>
-              <div class="list-text">
-                <span class="list-title">${clip.label}</span>
-                <span class="list-subline">${clip.start} - ${clip.end}</span>
-              </div>
-            </div>
-            <span class="pill ${decisionClass}">${decisionLabel}</span>
-          </button>
-        `;
-      }).join("");
-    }
-
-    function renderTracks() {
-      elements.tagTrack.innerHTML = state.clips.map((clip) => {
-        const result = getResult(clip.resultId);
-        const active = clip.id === state.activeClipId ? " active" : "";
-        const deleted = clip.decision === "delete" ? " deleted" : "";
-        return `
-          <button class="clip ${result.trackClass}${active}${deleted}" type="button" data-clip-id="${clip.id}" style="left: ${clip.left}%; width: ${clip.width}%;">
-            ${result.shortLabel}
-          </button>
-        `;
-      }).join("");
-
-      elements.subtitleTrack.innerHTML = state.clips.map((clip) => {
-        const active = clip.id === state.activeClipId ? " active" : "";
-        const deleted = clip.decision === "delete" ? " deleted" : "";
-        return `
-          <button class="clip subtitle-segment${active}${deleted}" type="button" data-clip-id="${clip.id}" style="left: ${clip.left}%; width: ${clip.width}%;" title="${clip.subtitle}">
-            ${clip.label}
-          </button>
-        `;
-      }).join("");
-
-      elements.highlightTrack.innerHTML = state.clips.map((clip) => {
-        const active = clip.id === state.activeClipId ? " active" : "";
-        const deleted = clip.decision === "delete" ? " deleted" : "";
-        return `
-          <button class="clip ${clip.highlightClass}${active}${deleted}" type="button" data-clip-id="${clip.id}" style="left: ${clip.left}%; width: ${clip.width}%;">
-            ${clip.label}
-          </button>
-        `;
-      }).join("");
-
-      const activeClip = getActiveClip();
-      elements.playhead.style.left = `${activeClip.left + activeClip.width / 2}%`;
-    }
-
-    function renderInspector() {
-      const clip = getActiveClip();
-      const result = getResult(clip.resultId);
-      elements.reviewingLabel.textContent = `Reviewing: ${clip.title}`;
-      elements.videoBadge.textContent = clip.decision === "delete" ? `${result.name} - Pending Delete` : result.name;
-      elements.subtitlePreview.textContent = clip.subtitle;
-      elements.clipTitle.textContent = clip.title;
-      elements.scoreValue.textContent = clip.score.toFixed(1);
-      elements.tagGroup.innerHTML = clip.tags.map((tag) => `<div class="tag">${tag}</div>`).join("");
-      elements.subtitleInput.value = clip.subtitle;
-      elements.startInput.value = clip.start;
-      elements.endInput.value = clip.end;
-      elements.videoFrame.classList.toggle("deleted", clip.decision === "delete");
-      elements.keepButton.classList.toggle("active", clip.decision === "keep");
-      elements.deleteButton.classList.toggle("active", clip.decision === "delete");
-      elements.keepButton.setAttribute("aria-pressed", String(clip.decision === "keep"));
-      elements.deleteButton.setAttribute("aria-pressed", String(clip.decision === "delete"));
-    }
-
-    function render() {
-      renderResults();
-      renderClipList();
-      renderTracks();
-      renderInspector();
-    }
-
-    document.addEventListener("click", (event) => {
-      const clipButton = event.target.closest("[data-clip-id]");
-      if (clipButton) {
-        state.activeClipId = clipButton.dataset.clipId;
-        render();
-        return;
-      }
-
-      const resultButton = event.target.closest("[data-result-id]");
-      if (resultButton) {
-        const firstMatch = state.clips.find((clip) => clip.resultId === resultButton.dataset.resultId);
-        if (firstMatch) {
-          state.activeClipId = firstMatch.id;
-          render();
-        }
-      }
-    });
-
-    elements.subtitleInput.addEventListener("input", (event) => {
-      const clip = getActiveClip();
-      clip.subtitle = event.target.value;
-      markDirty("Subtitle edited");
-      elements.subtitlePreview.textContent = clip.subtitle;
-      renderTracks();
-    });
-
-    elements.startInput.addEventListener("input", (event) => {
-      const clip = getActiveClip();
-      clip.start = event.target.value;
-      markDirty("Start time updated");
-      renderClipList();
-    });
-
-    elements.endInput.addEventListener("input", (event) => {
-      const clip = getActiveClip();
-      clip.end = event.target.value;
-      markDirty("End time updated");
-      renderClipList();
-    });
-
-    elements.keepButton.addEventListener("click", () => {
-      getActiveClip().decision = "keep";
-      markDirty("Clip kept");
-      render();
-    });
-
-    elements.deleteButton.addEventListener("click", () => {
-      getActiveClip().decision = "delete";
-      markDirty("Clip marked for removal");
-      render();
-    });
-
-    elements.saveButton.addEventListener("click", () => {
-      state.dirty = false;
-      setStatus("Autosaved", "saved");
-    });
-
-    elements.regenerateButton.addEventListener("click", () => {
-      const clip = getActiveClip();
-      const currentIndex = clip.alternatives.indexOf(clip.subtitle);
-      const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % clip.alternatives.length;
-      clip.subtitle = clip.alternatives[nextIndex];
-      markDirty("Alternative subtitle loaded");
-      renderInspector();
-      renderTracks();
-    });
-
-    elements.exportButton.addEventListener("click", () => {
-      setStatus("Ready to export", "export");
-      window.setTimeout(() => {
-        setStatus(state.dirty ? "Unsaved changes" : "Autosaved", state.dirty ? "dirty" : "saved");
-      }, 900);
-    });
-
-    render();
-  </script>
 </body>
 </html>
