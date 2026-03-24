@@ -236,6 +236,35 @@ output/lap01/
 `-- lap01_final.mp4
 ```
 
+## FastAPI backend (realtime job API)
+
+The repo now includes a minimal backend scaffold in `backend/`:
+
+- **FastAPI** for REST + WebSocket + SSE.
+- **Redis + RQ** for long-running task execution.
+
+### Run locally
+
+1. Start Redis (`redis://localhost:6379/0` by default).
+2. Start API server:
+
+   ```bash
+   uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+3. Start an RQ worker in another terminal:
+
+   ```bash
+   python -m backend.worker
+   ```
+
+### API endpoints
+
+- `POST /jobs` create a background job.
+- `GET /jobs/{job_id}` poll current status.
+- `GET /sse/jobs/{job_id}` stream status via SSE.
+- `WS /ws/jobs/{job_id}` stream status via WebSocket.
+
 ## More
 
 See `WORKFLOW.md` for the full stage-by-stage workflow.

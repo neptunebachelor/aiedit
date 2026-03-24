@@ -6,3 +6,7 @@ pillow>=10,<12
 python-dotenv>=1.0,<2
 requests>=2.32,<3
 tqdm>=4.66,<5
+fastapi>=0.116,<1
+uvicorn[standard]>=0.35,<1
+redis>=6.0,<7
+rq>=2.1,<3
