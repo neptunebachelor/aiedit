@@ -17,7 +17,7 @@ The pipeline is split into four explicit stages:
 1. `extract`
    Turn a video into LLM-ready images.
 2. `infer`
-   Send extracted frames to either a local Ollama model or a third-party API.
+   Send extracted frames to either a local Ollama model or an API model with automatic routing.
 3. `review`
    Build a reviewable edit plan, source/final SRT files, and an optional preview video.
 4. `render`
@@ -32,9 +32,17 @@ There is also an `edit` utility stage for patching an editable review plan:
 
 1. Install Python 3.12+.
 2. Install the dependencies in `requirements.txt`.
-3. Make sure Ollama is running if you use the local provider.
-4. Put exported videos into `input/`.
-5. Copy `config.example.toml` to `config.toml` if needed.
+3. For local development, create a `.env` file if you want Gemini or other API fallback.
+4. Make sure Ollama is running if you want local inference.
+5. Put exported videos into `input/`.
+6. Copy `config.example.toml` to `config.toml` if needed.
+
+Example `.env`:
+
+```ini
+GEMINI_API_KEY=
+GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+```
 
 ## Quick Start
 
@@ -54,21 +62,60 @@ python pipeline.py extract --video ./input/lap01.mp4 --config ./config.track.tom
 
 ### 2. Run inference
 
-Local Ollama:
+Automatic routing:
 
 ```bash
 python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 ```
 
-OpenAI-compatible provider:
+The default `infer` route is:
+
+- local Ollama first
+- Gemini 3 Flash next if local inference is unavailable and `GEMINI_API_KEY` is set
+- Qwen next if Gemini is unavailable and `DASHSCOPE_API_KEY` is set
+- generic OpenAI-compatible API last if it is explicitly configured for vision support
+
+Force Gemini:
 
 ```bash
 python pipeline.py infer \
   --video ./input/lap01.mp4 \
-  --provider-type openai_compatible \
-  --api-base https://your-api.example/v1 \
-  --model your-vision-model \
-  --api-key-env OPENAI_API_KEY
+  --provider gemini
+```
+
+Force the generic API route:
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider api
+```
+
+Force a specific OpenAI-compatible API model:
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider api \
+  --api-base https://api.deepseek.com \
+  --model deepseek-chat \
+  --api-key-env DEEPSEEK_API_KEY
+```
+
+Opt into Gemini async batch submission:
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider gemini \
+  --submission-mode async
+```
+
+Then collect the completed batch into `analysis.json`:
+
+```bash
+python pipeline.py collect \
+  --manifest ./output/lap01/analysis.batch.json
 ```
 
 ### 3. Review and preview
@@ -148,6 +195,10 @@ The config now supports both the original legacy sections and the new pipeline s
 - `sampling` and `extract`
 - `filters`
 - `ollama` and `provider`
+- `provider.routing`
+- `provider.ollama`
+- `provider.gemini`
+- `provider.openai_compatible`
 - `prompt`
 - `decision` and `selection`
 - `review`
@@ -157,7 +208,7 @@ The config now supports both the original legacy sections and the new pipeline s
 Key user-facing knobs:
 
 - frame interval or sample FPS
-- provider type and model
+- provider routing and model
 - API base URL and API key
 - target highlight duration
 - clip length limits
