@@ -68,17 +68,20 @@ output/<video_stem>/
 Goal:
 
 - call a vision model on extracted frames
+- route automatically between local Ollama and API inference when configured
 - turn frame-level decisions into merged source-time segments
 
 Supported provider types:
 
 - `ollama`
+- `gemini`
 - `openai_compatible`
 
 Primary inputs:
 
 - `--video`
 - `--extract-index`
+- `--provider`
 - `--provider-type`
 - `--api-base`
 - `--api-key`
@@ -92,13 +95,39 @@ Examples:
 python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 ```
 
+By default this prefers local Ollama, then Gemini 3 Flash, then Qwen, and finally a generic OpenAI-compatible API only if that provider is configured for vision support.
+
+For local development, the pipeline also loads a workspace `.env` file automatically. `GEMINI_BASE_URL` and `DEEPSEEK_BASE_URL` can override provider endpoints without editing TOML.
+
 ```bash
 python pipeline.py infer \
   --video ./input/lap01.mp4 \
-  --provider-type openai_compatible \
-  --api-base https://your-api.example/v1 \
-  --model your-vision-model \
-  --api-key-env OPENAI_API_KEY
+  --provider gemini
+```
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider api \
+  --api-base https://api.deepseek.com \
+  --model deepseek-chat \
+  --api-key-env DEEPSEEK_API_KEY
+```
+
+Async batch is opt-in. Submit a Gemini batch with:
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider gemini \
+  --submission-mode async
+```
+
+Then collect it later:
+
+```bash
+python pipeline.py collect \
+  --manifest ./output/lap01/analysis.batch.json
 ```
 
 Outputs:
@@ -112,6 +141,8 @@ output/<video_stem>/
 |-- highlights.json
 `-- highlights.srt
 ```
+
+When async batch mode is used, `infer` writes `analysis.batch.json` first and `collect` materializes the final `analysis.json`.
 
 `segments.raw.srt` stays on the original source-video timeline.
 
