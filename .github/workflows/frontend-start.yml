@@ -38,7 +38,6 @@ jobs:
 
       - name: Backend smoke check
         run: python pipeline.py --help
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -82,7 +81,6 @@ jobs:
           echo "--- vite.log ---"
           cat vite.log || true
           exit 1
-
 
       - name: Keep preview alive for manual check (PR only)
         if: github.event_name == 'pull_request'
