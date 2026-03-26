@@ -21,6 +21,9 @@ jobs:
   dev-env-check:
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,30 +67,38 @@ jobs:
       - name: Start frontend (Vite)
         working-directory: frontend
         run: |
-          nohup npm run dev -- --host 0.0.0.0 --port 18080 > vite.log 2>&1 &
-          echo $! > vite.pid
+          $process = Start-Process `
+            -FilePath "cmd.exe" `
+            -ArgumentList '/c', 'npm run dev -- --host 0.0.0.0 --port 18080 > vite.log 2>&1' `
+            -WorkingDirectory (Get-Location).Path `
+            -PassThru
+          Set-Content -Path vite.pid -Value $process.Id
 
       - name: Wait for frontend to boot
         working-directory: frontend
         run: |
-          for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:18080 > /dev/null; then
-              echo "Frontend is up"
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              Invoke-WebRequest -Uri "http://127.0.0.1:18080" -TimeoutSec 5 | Out-Null
+              Write-Host "Frontend is up"
               exit 0
-            fi
-            sleep 2
-          done
-          echo "Frontend failed to start"
-          echo "--- vite.log ---"
-          cat vite.log || true
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
+          Write-Host "Frontend failed to start"
+          if (Test-Path vite.log) {
+            Write-Host "--- vite.log ---"
+            Get-Content vite.log
+          }
           exit 1
 
       - name: Keep preview alive for manual check (PR only)
         if: github.event_name == 'pull_request'
         run: |
-          echo "Frontend preview is running on the NEP runner at port 18080."
-          echo "Keeping it alive for 30 minutes so reviewers can verify PR behavior."
-          sleep 1800
+          Write-Host "Frontend preview is running on the NEP runner at port 18080."
+          Write-Host "Keeping it alive for 30 minutes so reviewers can verify PR behavior."
+          Start-Sleep -Seconds 1800
 
       - name: Upload frontend log
         if: always()
@@ -100,6 +111,9 @@ jobs:
         if: always()
         working-directory: frontend
         run: |
-          if [ -f vite.pid ]; then
-            kill "$(cat vite.pid)" || true
-          fi
+          if (Test-Path vite.pid) {
+            $vitePid = (Get-Content vite.pid | Select-Object -First 1).Trim()
+            if ($vitePid) {
+              & taskkill /PID $vitePid /T /F 2>$null | Out-Null
+            }
+          }
