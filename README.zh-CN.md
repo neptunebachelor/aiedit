@@ -188,3 +188,34 @@ output/lap01/
 ## 更多说明
 
 完整的分阶段工作流请参考 `WORKFLOW.md`。
+
+## FastAPI 后端（实时任务版）
+
+仓库内新增了一个最小后端骨架 `backend/`，技术栈为：
+
+- **FastAPI**：对外提供 HTTP API、WebSocket、SSE。
+- **Redis + RQ**：派发和执行耗时任务，避免阻塞 Web 服务。
+
+### 启动步骤
+
+1. 启动 Redis（本地默认 `redis://localhost:6379/0`）。
+2. 启动 API：
+
+   ```bash
+   uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+3. 启动 Worker（另一个终端）：
+
+   ```bash
+   python -m backend.worker
+   ```
+
+### API 一览
+
+- `POST /jobs`：提交任务（例如传入视频路径）。
+- `GET /jobs/{job_id}`：轮询任务状态。
+- `GET /sse/jobs/{job_id}`：SSE 实时进度。
+- `WS /ws/jobs/{job_id}`：WebSocket 实时进度。
+
+你可以把前端（例如 `prototype/index.html`）对接到 SSE/WS 接口实现实时进度条。
