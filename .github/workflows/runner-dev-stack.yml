@@ -1,0 +1,261 @@
+name: Runner Dev Stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      frontend_port:
+        description: Frontend port exposed on the runner
+        required: false
+        default: "18080"
+        type: string
+      backend_port:
+        description: Backend port exposed on the runner
+        required: false
+        default: "18081"
+        type: string
+      keep_alive_minutes:
+        description: How long to keep the stack alive after startup
+        required: false
+        default: "30"
+        type: string
+      review_job_file:
+        description: Seed review job JSON file, relative to the repository root
+        required: false
+        default: "devdata/review-job.json"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  runner-dev-stack:
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 90
+    env:
+      FRONTEND_PORT: ${{ github.event.inputs.frontend_port }}
+      BACKEND_PORT: ${{ github.event.inputs.backend_port }}
+      KEEP_ALIVE_MINUTES: ${{ github.event.inputs.keep_alive_minutes }}
+      REVIEW_JOB_FILE: ${{ github.event.inputs.review_job_file }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install backend dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Backend smoke check
+        shell: pwsh
+        run: |
+          python dev_server.py --help | Out-Null
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        shell: pwsh
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend bundle
+        shell: pwsh
+        working-directory: frontend
+        run: npm run build
+
+      - name: Start backend service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repoRoot = (Get-Location).Path
+          $logsDir = Join-Path $repoRoot "runner-logs"
+          New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
+
+          $backendLog = Join-Path $logsDir "backend.log"
+          $backendErrorLog = Join-Path $logsDir "backend.err.log"
+          $backendArguments = @(
+            "dev_server.py",
+            "--host", "0.0.0.0",
+            "--port", "${env:BACKEND_PORT}",
+            "--job-file", "${env:REVIEW_JOB_FILE}",
+            "--state-file", "output/dev-review/review-job.json",
+            "--allowed-origin", "*"
+          )
+
+          $backendProcess = Start-Process `
+            -FilePath "python" `
+            -ArgumentList $backendArguments `
+            -WorkingDirectory $repoRoot `
+            -RedirectStandardOutput $backendLog `
+            -RedirectStandardError $backendErrorLog `
+            -PassThru
+
+          $backendProcess.Id | Set-Content -Path (Join-Path $logsDir "backend.pid") -Encoding ascii
+
+      - name: Wait for backend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $logsDir = Join-Path (Get-Location).Path "runner-logs"
+          $backendLog = Join-Path $logsDir "backend.log"
+          $backendErrorLog = Join-Path $logsDir "backend.err.log"
+          $backendUrl = "http://127.0.0.1:${env:BACKEND_PORT}/healthz"
+          $isReady = $false
+
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -Uri $backendUrl -TimeoutSec 5
+              if ($response.StatusCode -eq 200) {
+                $isReady = $true
+                break
+              }
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
+
+          if (-not $isReady) {
+            Write-Host "Backend failed to start."
+            if (Test-Path $backendLog) {
+              Write-Host "--- backend.log ---"
+              Get-Content $backendLog
+            }
+            if (Test-Path $backendErrorLog) {
+              Write-Host "--- backend.err.log ---"
+              Get-Content $backendErrorLog
+            }
+            exit 1
+          }
+
+      - name: Start frontend service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repoRoot = (Get-Location).Path
+          $logsDir = Join-Path $repoRoot "runner-logs"
+          $frontendDir = Join-Path $repoRoot "frontend"
+          $frontendLog = Join-Path $logsDir "frontend.log"
+          $frontendErrorLog = Join-Path $logsDir "frontend.err.log"
+
+          $env:VITE_API_BASE_URL = "http://127.0.0.1:${env:BACKEND_PORT}"
+          $frontendArguments = @("run", "dev", "--", "--host", "0.0.0.0", "--port", "${env:FRONTEND_PORT}")
+
+          $frontendProcess = Start-Process `
+            -FilePath "npm.cmd" `
+            -ArgumentList $frontendArguments `
+            -WorkingDirectory $frontendDir `
+            -RedirectStandardOutput $frontendLog `
+            -RedirectStandardError $frontendErrorLog `
+            -PassThru
+
+          $frontendProcess.Id | Set-Content -Path (Join-Path $logsDir "frontend.pid") -Encoding ascii
+
+      - name: Wait for frontend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $logsDir = Join-Path (Get-Location).Path "runner-logs"
+          $frontendLog = Join-Path $logsDir "frontend.log"
+          $frontendErrorLog = Join-Path $logsDir "frontend.err.log"
+          $frontendUrl = "http://127.0.0.1:${env:FRONTEND_PORT}"
+          $isReady = $false
+
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -Uri $frontendUrl -TimeoutSec 5
+              if ($response.StatusCode -eq 200) {
+                $isReady = $true
+                break
+              }
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
+
+          if (-not $isReady) {
+            Write-Host "Frontend failed to start."
+            if (Test-Path $frontendLog) {
+              Write-Host "--- frontend.log ---"
+              Get-Content $frontendLog
+            }
+            if (Test-Path $frontendErrorLog) {
+              Write-Host "--- frontend.err.log ---"
+              Get-Content $frontendErrorLog
+            }
+            exit 1
+          }
+
+      - name: Publish runner access summary
+        shell: pwsh
+        run: |
+          $runnerHost = $env:COMPUTERNAME
+          $summaryLines = @(
+            "## Runner Dev Stack",
+            "",
+            "- Frontend (local): http://127.0.0.1:${env:FRONTEND_PORT}",
+            "- Backend (local): http://127.0.0.1:${env:BACKEND_PORT}",
+            "- Frontend (runner host): http://$runnerHost:${env:FRONTEND_PORT}",
+            "- Backend (runner host): http://$runnerHost:${env:BACKEND_PORT}",
+            "- Seed review job: ${env:REVIEW_JOB_FILE}",
+            "- Saved edits: output/dev-review/review-job.json"
+          )
+          $summaryLines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Keep stack alive
+        shell: pwsh
+        run: |
+          $minutes = [int]$env:KEEP_ALIVE_MINUTES
+          if ($minutes -le 0) {
+            Write-Host "Skipping keep-alive because keep_alive_minutes <= 0."
+            exit 0
+          }
+
+          Write-Host "Keeping frontend and backend online for $minutes minute(s)."
+          Start-Sleep -Seconds ($minutes * 60)
+
+      - name: Stop frontend and backend
+        if: always()
+        shell: pwsh
+        run: |
+          $logsDir = Join-Path (Get-Location).Path "runner-logs"
+
+          foreach ($serviceName in @("frontend", "backend")) {
+            $pidFile = Join-Path $logsDir "$serviceName.pid"
+            if (-not (Test-Path $pidFile)) {
+              continue
+            }
+
+            $processId = Get-Content $pidFile | Select-Object -First 1
+            if ([string]::IsNullOrWhiteSpace($processId)) {
+              continue
+            }
+
+            Stop-Process -Id ([int]$processId) -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload runner logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-dev-stack-logs
+          path: runner-logs
+          if-no-files-found: warn
+
+      - name: Upload saved review job
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-dev-stack-output
+          path: output/dev-review
+          if-no-files-found: warn

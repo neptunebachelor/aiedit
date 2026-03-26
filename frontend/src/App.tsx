@@ -39,9 +39,9 @@ export default function App() {
     return (
       <div className="boot-screen">
         <div className="boot-panel">
-          <div className="boot-kicker">Frontend Scaffold</div>
+          <div className="boot-kicker">Review Workspace</div>
           <h1>Loading review workspace...</h1>
-          <p>Bootstrapping mock review data into the React store.</p>
+          <p>Bootstrapping review data into the React store.</p>
         </div>
       </div>
     );
@@ -51,9 +51,9 @@ export default function App() {
     return (
       <div className="boot-screen">
         <div className="boot-panel">
-          <div className="boot-kicker">Frontend Scaffold</div>
+          <div className="boot-kicker">Review Workspace</div>
           <h1>Workspace failed to load.</h1>
-          <p>Check the mock API layer in <code>src/lib/api.ts</code> before wiring in the backend.</p>
+          <p>Check <code>VITE_API_BASE_URL</code> or the fallback mock API layer in <code>src/lib/api.ts</code>.</p>
         </div>
       </div>
     );
@@ -61,4 +61,3 @@ export default function App() {
 
   return <ReviewWorkspace />;
 }
-
