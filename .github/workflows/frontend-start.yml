@@ -161,7 +161,11 @@ jobs:
             exit 0
           }
 
-          taskkill.exe /PID ([int]$processId) /T /F *> $null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Vite process $processId was already stopped."
+          cmd.exe /c "taskkill /PID $processId /T /F >nul 2>&1"
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Stopped Vite process $processId."
+            exit 0
           }
+
+          Write-Host "Vite process $processId was already stopped."
+          $global:LASTEXITCODE = 0

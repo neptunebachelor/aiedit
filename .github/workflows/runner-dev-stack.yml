@@ -256,10 +256,14 @@ jobs:
               continue
             }
 
-            taskkill.exe /PID ([int]$processId) /T /F *> $null
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "$serviceName process $processId was already stopped."
+            cmd.exe /c "taskkill /PID $processId /T /F >nul 2>&1"
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Stopped $serviceName process $processId."
+              continue
             }
+
+            Write-Host "$serviceName process $processId was already stopped."
+            $global:LASTEXITCODE = 0
           }
 
       - name: Upload runner logs
