@@ -21,6 +21,8 @@ jobs:
   dev-env-check:
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 45
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}\.npm-cache
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,13 +49,14 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
+        shell: pwsh
         working-directory: frontend
-        run: npm ci
-
+        run: npm.cmd ci
 
       - name: Build frontend preview bundle
+        shell: pwsh
         working-directory: frontend
-        run: npm run build
+        run: npm.cmd run build
 
       - name: Upload frontend preview bundle
         if: always()
@@ -63,45 +66,102 @@ jobs:
           path: frontend/dist
 
       - name: Start frontend (Vite)
+        shell: pwsh
         working-directory: frontend
         run: |
-          nohup npm run dev -- --host 0.0.0.0 --port 18080 > vite.log 2>&1 &
-          echo $! > vite.pid
+          $ErrorActionPreference = "Stop"
+          $frontendDir = (Get-Location).Path
+          $logPath = Join-Path $frontendDir "vite.log"
+          $errorLogPath = Join-Path $frontendDir "vite.err.log"
+          $npmPath = (Get-Command npm.cmd).Source
+          $powershellPath = (Get-Command powershell.exe).Source
+
+          $frontendCommand = @"
+          Set-Location '$frontendDir'
+          & '$npmPath' 'run' 'dev' '--' '--host' '0.0.0.0' '--port' '18080' 1>> '$logPath' 2>> '$errorLogPath'
+          "@
+
+          $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($frontendCommand))
+          $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+          $startInfo.FileName = $powershellPath
+          $startInfo.Arguments = "-NoProfile -EncodedCommand $encodedCommand"
+          $startInfo.WorkingDirectory = $frontendDir
+          $startInfo.UseShellExecute = $false
+          $startInfo.CreateNoWindow = $true
+
+          $process = [System.Diagnostics.Process]::Start($startInfo)
+          if ($null -eq $process) {
+            throw "Failed to start Vite dev server."
+          }
+
+          $process.Id | Set-Content -Path (Join-Path $frontendDir "vite.pid") -Encoding ascii
 
       - name: Wait for frontend to boot
+        shell: pwsh
         working-directory: frontend
         run: |
-          for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:18080 > /dev/null; then
-              echo "Frontend is up"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Frontend failed to start"
-          echo "--- vite.log ---"
-          cat vite.log || true
-          exit 1
+          $ErrorActionPreference = "Stop"
+          $frontendUrl = "http://127.0.0.1:18080"
+          $isReady = $false
 
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -Uri $frontendUrl -TimeoutSec 5
+              if ($response.StatusCode -eq 200) {
+                Write-Host "Frontend is up"
+                $isReady = $true
+                break
+              }
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
+
+          if (-not $isReady) {
+            Write-Host "Frontend failed to start"
+            if (Test-Path vite.log) {
+              Write-Host "--- vite.log ---"
+              Get-Content vite.log
+            }
+            if (Test-Path vite.err.log) {
+              Write-Host "--- vite.err.log ---"
+              Get-Content vite.err.log
+            }
+            exit 1
+          }
 
       - name: Keep preview alive for manual check (PR only)
         if: github.event_name == 'pull_request'
+        shell: pwsh
         run: |
-          echo "Frontend preview is running on the NEP runner at port 18080."
-          echo "Keeping it alive for 30 minutes so reviewers can verify PR behavior."
-          sleep 1800
+          Write-Host "Frontend preview is running on the NEP runner at port 18080."
+          Write-Host "Keeping it alive for 30 minutes so reviewers can verify PR behavior."
+          Start-Sleep -Seconds 1800
 
       - name: Upload frontend log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vite-log
-          path: frontend/vite.log
+          path: |
+            frontend/vite.log
+            frontend/vite.err.log
 
       - name: Stop frontend
         if: always()
+        shell: pwsh
         working-directory: frontend
         run: |
-          if [ -f vite.pid ]; then
-            kill "$(cat vite.pid)" || true
-          fi
+          if (-not (Test-Path vite.pid)) {
+            exit 0
+          }
+
+          $processId = Get-Content vite.pid | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($processId)) {
+            exit 0
+          }
+
+          taskkill.exe /PID ([int]$processId) /T /F *> $null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Vite process $processId was already stopped."
+          }

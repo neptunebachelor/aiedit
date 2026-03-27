@@ -36,6 +36,7 @@ jobs:
       BACKEND_PORT: ${{ github.event.inputs.backend_port }}
       KEEP_ALIVE_MINUTES: ${{ github.event.inputs.keep_alive_minutes }}
       REVIEW_JOB_FILE: ${{ github.event.inputs.review_job_file }}
+      NPM_CONFIG_CACHE: ${{ github.workspace }}\.npm-cache
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,12 +68,12 @@ jobs:
       - name: Install frontend dependencies
         shell: pwsh
         working-directory: frontend
-        run: npm ci
+        run: npm.cmd ci
 
       - name: Build frontend bundle
         shell: pwsh
         working-directory: frontend
-        run: npm run build
+        run: npm.cmd run build
 
       - name: Start backend service
         shell: pwsh
@@ -84,22 +85,26 @@ jobs:
 
           $backendLog = Join-Path $logsDir "backend.log"
           $backendErrorLog = Join-Path $logsDir "backend.err.log"
-          $backendArguments = @(
-            "dev_server.py",
-            "--host", "0.0.0.0",
-            "--port", "${env:BACKEND_PORT}",
-            "--job-file", "${env:REVIEW_JOB_FILE}",
-            "--state-file", "output/dev-review/review-job.json",
-            "--allowed-origin", "*"
-          )
+          $pythonPath = (Get-Command python).Source
+          $powershellPath = (Get-Command powershell.exe).Source
 
-          $backendProcess = Start-Process `
-            -FilePath "python" `
-            -ArgumentList $backendArguments `
-            -WorkingDirectory $repoRoot `
-            -RedirectStandardOutput $backendLog `
-            -RedirectStandardError $backendErrorLog `
-            -PassThru
+          $backendCommand = @"
+          Set-Location '$repoRoot'
+          & '$pythonPath' 'dev_server.py' '--host' '0.0.0.0' '--port' '${env:BACKEND_PORT}' '--job-file' '${env:REVIEW_JOB_FILE}' '--state-file' 'output/dev-review/review-job.json' '--allowed-origin' '*' 1>> '$backendLog' 2>> '$backendErrorLog'
+          "@
+
+          $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($backendCommand))
+          $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+          $startInfo.FileName = $powershellPath
+          $startInfo.Arguments = "-NoProfile -EncodedCommand $encodedCommand"
+          $startInfo.WorkingDirectory = $repoRoot
+          $startInfo.UseShellExecute = $false
+          $startInfo.CreateNoWindow = $true
+
+          $backendProcess = [System.Diagnostics.Process]::Start($startInfo)
+          if ($null -eq $backendProcess) {
+            throw "Failed to start backend service."
+          }
 
           $backendProcess.Id | Set-Content -Path (Join-Path $logsDir "backend.pid") -Encoding ascii
 
@@ -147,17 +152,27 @@ jobs:
           $frontendDir = Join-Path $repoRoot "frontend"
           $frontendLog = Join-Path $logsDir "frontend.log"
           $frontendErrorLog = Join-Path $logsDir "frontend.err.log"
+          $npmPath = (Get-Command npm.cmd).Source
+          $powershellPath = (Get-Command powershell.exe).Source
 
-          $env:VITE_API_BASE_URL = "http://127.0.0.1:${env:BACKEND_PORT}"
-          $frontendArguments = @("run", "dev", "--", "--host", "0.0.0.0", "--port", "${env:FRONTEND_PORT}")
+          $frontendCommand = @"
+          Set-Location '$frontendDir'
+          $env:VITE_API_BASE_URL = 'http://127.0.0.1:${env:BACKEND_PORT}'
+          & '$npmPath' 'run' 'dev' '--' '--host' '0.0.0.0' '--port' '${env:FRONTEND_PORT}' 1>> '$frontendLog' 2>> '$frontendErrorLog'
+          "@
 
-          $frontendProcess = Start-Process `
-            -FilePath "npm.cmd" `
-            -ArgumentList $frontendArguments `
-            -WorkingDirectory $frontendDir `
-            -RedirectStandardOutput $frontendLog `
-            -RedirectStandardError $frontendErrorLog `
-            -PassThru
+          $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($frontendCommand))
+          $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+          $startInfo.FileName = $powershellPath
+          $startInfo.Arguments = "-NoProfile -EncodedCommand $encodedCommand"
+          $startInfo.WorkingDirectory = $frontendDir
+          $startInfo.UseShellExecute = $false
+          $startInfo.CreateNoWindow = $true
+
+          $frontendProcess = [System.Diagnostics.Process]::Start($startInfo)
+          if ($null -eq $frontendProcess) {
+            throw "Failed to start frontend service."
+          }
 
           $frontendProcess.Id | Set-Content -Path (Join-Path $logsDir "frontend.pid") -Encoding ascii
 
@@ -241,7 +256,10 @@ jobs:
               continue
             }
 
-            Stop-Process -Id ([int]$processId) -Force -ErrorAction SilentlyContinue
+            taskkill.exe /PID ([int]$processId) /T /F *> $null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "$serviceName process $processId was already stopped."
+            }
           }
 
       - name: Upload runner logs
