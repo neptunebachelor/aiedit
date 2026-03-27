@@ -49,12 +49,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
-        shell: pwsh
+        shell: powershell
         working-directory: frontend
         run: npm.cmd ci
 
       - name: Build frontend preview bundle
-        shell: pwsh
+        shell: powershell
         working-directory: frontend
         run: npm.cmd run build
 
@@ -66,7 +66,7 @@ jobs:
           path: frontend/dist
 
       - name: Start frontend (Vite)
-        shell: pwsh
+        shell: powershell
         working-directory: frontend
         run: |
           $ErrorActionPreference = "Stop"
@@ -97,7 +97,7 @@ jobs:
           $process.Id | Set-Content -Path (Join-Path $frontendDir "vite.pid") -Encoding ascii
 
       - name: Wait for frontend to boot
-        shell: pwsh
+        shell: powershell
         working-directory: frontend
         run: |
           $ErrorActionPreference = "Stop"
@@ -132,7 +132,7 @@ jobs:
 
       - name: Keep preview alive for manual check (PR only)
         if: github.event_name == 'pull_request'
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "Frontend preview is running on the NEP runner at port 18080."
           Write-Host "Keeping it alive for 30 minutes so reviewers can verify PR behavior."
@@ -149,7 +149,7 @@ jobs:
 
       - name: Stop frontend
         if: always()
-        shell: pwsh
+        shell: powershell
         working-directory: frontend
         run: |
           if (-not (Test-Path vite.pid)) {

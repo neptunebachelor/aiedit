@@ -48,13 +48,13 @@ jobs:
           cache: pip
 
       - name: Install backend dependencies
-        shell: pwsh
+        shell: powershell
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Backend smoke check
-        shell: pwsh
+        shell: powershell
         run: |
           python dev_server.py --help | Out-Null
 
@@ -66,17 +66,17 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
-        shell: pwsh
+        shell: powershell
         working-directory: frontend
         run: npm.cmd ci
 
       - name: Build frontend bundle
-        shell: pwsh
+        shell: powershell
         working-directory: frontend
         run: npm.cmd run build
 
       - name: Start backend service
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $repoRoot = (Get-Location).Path
@@ -109,7 +109,7 @@ jobs:
           $backendProcess.Id | Set-Content -Path (Join-Path $logsDir "backend.pid") -Encoding ascii
 
       - name: Wait for backend
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $logsDir = Join-Path (Get-Location).Path "runner-logs"
@@ -144,7 +144,7 @@ jobs:
           }
 
       - name: Start frontend service
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $repoRoot = (Get-Location).Path
@@ -177,7 +177,7 @@ jobs:
           $frontendProcess.Id | Set-Content -Path (Join-Path $logsDir "frontend.pid") -Encoding ascii
 
       - name: Wait for frontend
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $logsDir = Join-Path (Get-Location).Path "runner-logs"
@@ -212,7 +212,7 @@ jobs:
           }
 
       - name: Publish runner access summary
-        shell: pwsh
+        shell: powershell
         run: |
           $runnerHost = $env:COMPUTERNAME
           $summaryLines = @(
@@ -228,7 +228,7 @@ jobs:
           $summaryLines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Keep stack alive
-        shell: pwsh
+        shell: powershell
         run: |
           $minutes = [int]$env:KEEP_ALIVE_MINUTES
           if ($minutes -le 0) {
@@ -241,7 +241,7 @@ jobs:
 
       - name: Stop frontend and backend
         if: always()
-        shell: pwsh
+        shell: powershell
         run: |
           $logsDir = Join-Path (Get-Location).Path "runner-logs"
 
