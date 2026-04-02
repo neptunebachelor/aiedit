@@ -184,6 +184,9 @@ RESOLUTION_HEIGHTS = {
     "source": 0,
 }
 
+MIN_SAMPLE_FPS = 0.1
+MAX_SAMPLE_FPS = 24.0
+
 
 @dataclass
 class VideoMeta:
@@ -719,7 +722,11 @@ def parse_args() -> argparse.Namespace:
     extract_parser = subparsers.add_parser("extract", help="Sample candidate frames from video(s).")
     add_common_video_args(extract_parser)
     extract_parser.add_argument("--frame-interval-seconds", type=float, help="Sample one frame every N seconds.")
-    extract_parser.add_argument("--sample-fps", type=float, help="Alternative to frame interval. Sample N frames per second.")
+    extract_parser.add_argument(
+        "--sample-fps",
+        type=float,
+        help=f"Alternative to frame interval. Sample N frames per second ({MIN_SAMPLE_FPS}-{MAX_SAMPLE_FPS}, default 1).",
+    )
     extract_parser.add_argument("--max-frames", type=int, help="Limit the number of sampled frames.")
     extract_parser.add_argument("--jpeg-quality", type=int, help="JPEG quality used when writing extracted frames.")
     extract_parser.add_argument("--resize-for-llm", type=int, help="Maximum output dimension for extracted frames.")
@@ -833,6 +840,69 @@ def parse_args() -> argparse.Namespace:
     cancel_parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
     cancel_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
+    run_parser = subparsers.add_parser("run", help="Run extract -> infer -> review -> render in one command.")
+    add_common_video_args(run_parser)
+    run_parser.add_argument("--extract-index", help="Optional extract/index.json. Skips extract when provided.")
+    run_parser.add_argument(
+        "--provider",
+        choices=["auto", "local", "gemini", "qwen", "api"],
+        help="Provider routing for this run. auto prefers local Ollama, then Gemini, then Qwen, then generic API.",
+    )
+    run_parser.add_argument("--provider-type", choices=["ollama", "openai_compatible"])
+    run_parser.add_argument("--api-base", help="Provider API base URL.")
+    run_parser.add_argument("--api-key", help="API key for third-party providers.")
+    run_parser.add_argument("--api-key-env", help="Environment variable used to read the API key.")
+    run_parser.add_argument("--model", help="Vision model name.")
+    run_parser.add_argument("--temperature", type=float, help="Sampling temperature for the provider.")
+    run_parser.add_argument("--timeout-seconds", type=float, help="Provider timeout in seconds.")
+    run_parser.add_argument(
+        "--submission-mode",
+        choices=["auto", "sync", "async"],
+        help="Execution mode for inference. auto uses async batch when the selected API provider supports it.",
+    )
+    run_parser.add_argument(
+        "--force-resubmit",
+        action="store_true",
+        help="Create a new async batch even if an active manifest already exists for the same extract output.",
+    )
+    run_parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Ignore any saved sync infer checkpoint and start from the first candidate frame again.",
+    )
+    run_parser.add_argument("--frame-interval-seconds", type=float, help="Sample one frame every N seconds.")
+    run_parser.add_argument(
+        "--sample-fps",
+        type=float,
+        help=f"Alternative to frame interval. Sample N frames per second ({MIN_SAMPLE_FPS}-{MAX_SAMPLE_FPS}, default 1).",
+    )
+    run_parser.add_argument("--max-frames", type=int, help="Limit the number of sampled frames.")
+    run_parser.add_argument("--jpeg-quality", type=int, help="JPEG quality used when writing extracted frames.")
+    run_parser.add_argument("--resize-for-llm", type=int, help="Maximum output dimension for extracted frames.")
+    run_parser.add_argument("--target-seconds", type=float, help="Target total duration for the compact plan.")
+    run_parser.add_argument("--clip-before", type=float, help="Seconds kept before each highlight anchor.")
+    run_parser.add_argument("--clip-after", type=float, help="Seconds kept after each highlight anchor.")
+    run_parser.add_argument("--cluster-gap", type=float, help="Maximum gap between timestamps before split.")
+    run_parser.add_argument("--min-clip-seconds", type=float, help="Minimum duration for selected clips.")
+    run_parser.add_argument("--max-clip-seconds", type=float, help="Maximum duration for selected clips.")
+    run_parser.add_argument("--max-clips-per-source-segment", type=int, help="Diversity limit per source segment.")
+    run_parser.add_argument(
+        "--caption-mode",
+        choices=["score", "reason", "human"],
+        help="How subtitles should be written for review and render.",
+    )
+    run_parser.add_argument("--stem", help="Output stem for review/render outputs.")
+    run_parser.add_argument(
+        "--resolution",
+        choices=sorted(RESOLUTION_HEIGHTS.keys()),
+        help="Render resolution. One of 540p, 720p, 1080p, source.",
+    )
+    run_parser.add_argument("--crf", type=int, help="CRF used when encoding intermediate clips.")
+    run_parser.add_argument("--preset", help="Preset used when encoding intermediate clips.")
+    run_parser.add_argument("--ffmpeg", help="Optional path to ffmpeg executable.")
+    run_parser.add_argument("--skip-review", action="store_true", help="Render directly from analysis.json.")
+    run_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+
     return parser.parse_args()
 
 
@@ -942,6 +1012,11 @@ def finalize_extract_settings(settings: dict[str, Any]) -> dict[str, Any]:
     else:
         resolved["frame_interval_seconds"] = 1.0
         resolved["sample_fps"] = 1.0
+    resolved_sample_fps = float(resolved["sample_fps"])
+    if not (MIN_SAMPLE_FPS <= resolved_sample_fps <= MAX_SAMPLE_FPS):
+        raise ValueError(
+            f"sample_fps must be between {MIN_SAMPLE_FPS} and {MAX_SAMPLE_FPS}, got {resolved_sample_fps}"
+        )
     resolved["jpeg_quality"] = int(resolved.get("jpeg_quality", 88))
     resolved["max_frames"] = int(resolved.get("max_frames", 0))
     resolved["resize_for_llm"] = int(resolved.get("resize_for_llm", 0))
@@ -2464,6 +2539,39 @@ def command_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_run(args: argparse.Namespace) -> int:
+    configure_logging(args.log_level)
+    config = load_pipeline_config(Path(args.config).expanduser())
+    output_root = resolve_output_root(config, args.output_root)
+    input_path = Path(args.video).expanduser().resolve()
+    videos = list_videos(input_path, config)
+    if not videos:
+        raise FileNotFoundError(f"No videos found in {input_path}")
+
+    for video_path in videos:
+        video_args = argparse.Namespace(**vars(args))
+        video_args.video = str(video_path)
+
+        command_extract(video_args)
+        command_infer(video_args)
+
+        if bool(getattr(args, "skip_review", False)):
+            render_input = output_root / video_path.stem / "analysis.json"
+        else:
+            review_args = argparse.Namespace(**vars(video_args))
+            review_args.input = str(output_root / video_path.stem / "analysis.json")
+            review_args.output_dir = str(output_root / video_path.stem)
+            command_review(review_args)
+            review_stem = review_args.stem or default_stem(float(review_args.target_seconds or config["review"]["target_seconds"]))
+            render_input = output_root / video_path.stem / f"{review_stem}.editable.json"
+
+        render_args = argparse.Namespace(**vars(video_args))
+        render_args.input = str(render_input)
+        render_args.output_dir = str(output_root / video_path.stem)
+        command_render(render_args)
+    return 0
+
+
 def command_edit_update_segment(args: argparse.Namespace) -> int:
     configure_logging("INFO")
     plan_path = Path(args.plan).expanduser().resolve()
@@ -2517,6 +2625,8 @@ def main() -> int:
         return command_review(args)
     if args.command == "render":
         return command_render(args)
+    if args.command == "run":
+        return command_run(args)
     if args.command == "edit":
         if args.edit_command == "update-segment":
             return command_edit_update_segment(args)
