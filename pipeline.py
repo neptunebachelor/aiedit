@@ -1028,8 +1028,17 @@ def configure_logging(level: str) -> None:
     logging.basicConfig(level=getattr(logging, level), format="%(levelname)s: %(message)s")
 
 
-def resolve_output_root(config: dict[str, Any], override: str | None) -> Path:
-    return Path(override or config["project"]["output"]).expanduser().resolve()
+def resolve_output_root(config: dict[str, Any], override: str | None, video_path: Path | None = None) -> Path:
+    if override:
+        return Path(override).expanduser().resolve()
+    if video_path is not None:
+        return video_path.parent.resolve()
+    return Path(config["project"]["output"]).expanduser().resolve()
+
+
+def resolve_video_output_dir(config: dict[str, Any], override: str | None, video_path: Path) -> Path:
+    output_root = resolve_output_root(config, override, video_path)
+    return output_root / video_path.stem
 
 
 def probe_video(video_path: Path) -> VideoMeta:
@@ -1549,8 +1558,8 @@ def ensure_extract_index(args: argparse.Namespace, config: dict[str, Any]) -> Pa
         return Path(args.extract_index).expanduser().resolve()
 
     video_path = Path(args.video).expanduser().resolve()
-    output_root = resolve_output_root(config, getattr(args, "output_root", None))
-    candidate_index = output_root / video_path.stem / "extract" / "index.json"
+    video_output_dir = resolve_video_output_dir(config, getattr(args, "output_root", None), video_path)
+    candidate_index = video_output_dir / "extract" / "index.json"
     if candidate_index.exists():
         return candidate_index
 
@@ -1558,7 +1567,7 @@ def ensure_extract_index(args: argparse.Namespace, config: dict[str, Any]) -> Pa
     extract_settings = config["extract"]
     return extract_candidates_for_video(
         video_path,
-        output_root=output_root,
+        output_root=video_output_dir.parent,
         config=config,
         frame_interval_seconds=float(extract_settings["frame_interval_seconds"]),
         max_frames=int(extract_settings["max_frames"]),
@@ -2307,8 +2316,6 @@ def command_extract(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
     config = load_pipeline_config(Path(args.config).expanduser())
     input_path = Path(args.video).expanduser().resolve()
-    output_root = resolve_output_root(config, args.output_root)
-    output_root.mkdir(parents=True, exist_ok=True)
 
     extract_settings = copy.deepcopy(config["extract"])
     if args.frame_interval_seconds is not None:
@@ -2331,9 +2338,11 @@ def command_extract(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"No videos found in {input_path}")
 
     for video_path in videos:
+        video_output_dir = resolve_video_output_dir(config, args.output_root, video_path)
+        video_output_dir.parent.mkdir(parents=True, exist_ok=True)
         extract_candidates_for_video(
             video_path,
-            output_root=output_root,
+            output_root=video_output_dir.parent,
             config=config,
             frame_interval_seconds=float(extract_settings["frame_interval_seconds"]),
             max_frames=int(extract_settings["max_frames"]),
@@ -2542,13 +2551,13 @@ def command_render(args: argparse.Namespace) -> int:
 def command_run(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
     config = load_pipeline_config(Path(args.config).expanduser())
-    output_root = resolve_output_root(config, args.output_root)
     input_path = Path(args.video).expanduser().resolve()
     videos = list_videos(input_path, config)
     if not videos:
         raise FileNotFoundError(f"No videos found in {input_path}")
 
     for video_path in videos:
+        video_output_dir = resolve_video_output_dir(config, args.output_root, video_path)
         video_args = argparse.Namespace(**vars(args))
         video_args.video = str(video_path)
 
@@ -2556,18 +2565,18 @@ def command_run(args: argparse.Namespace) -> int:
         command_infer(video_args)
 
         if bool(getattr(args, "skip_review", False)):
-            render_input = output_root / video_path.stem / "analysis.json"
+            render_input = video_output_dir / "analysis.json"
         else:
             review_args = argparse.Namespace(**vars(video_args))
-            review_args.input = str(output_root / video_path.stem / "analysis.json")
-            review_args.output_dir = str(output_root / video_path.stem)
+            review_args.input = str(video_output_dir / "analysis.json")
+            review_args.output_dir = str(video_output_dir)
             command_review(review_args)
             review_stem = review_args.stem or default_stem(float(review_args.target_seconds or config["review"]["target_seconds"]))
-            render_input = output_root / video_path.stem / f"{review_stem}.editable.json"
+            render_input = video_output_dir / f"{review_stem}.editable.json"
 
         render_args = argparse.Namespace(**vars(video_args))
         render_args.input = str(render_input)
-        render_args.output_dir = str(output_root / video_path.stem)
+        render_args.output_dir = str(video_output_dir)
         command_render(render_args)
     return 0
 
