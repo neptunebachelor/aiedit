@@ -28,6 +28,10 @@ There is also an `edit` utility stage for patching an editable review plan:
 - `edit update-segment`
 - `edit update-caption`
 
+And a one-shot stage:
+
+- `run` (extract -> infer -> review -> render)
+
 ## Setup
 
 1. Install Python 3.12+.
@@ -186,6 +190,20 @@ python pipeline.py render \
   --stem lap01_final_720p \
   --resolution 720p
 ```
+
+### One command for the full CLI flow
+
+```bash
+python pipeline.py run \
+  --video ./input/lap01.mp4 \
+  --provider auto \
+  --sample-fps 1 \
+  --target-seconds 30 \
+  --caption-mode human \
+  --resolution source
+```
+
+`--sample-fps` accepts values from `0.1` to `24` (default `1`).
 
 ## Configuration
 
