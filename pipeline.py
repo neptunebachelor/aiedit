@@ -2426,9 +2426,17 @@ def build_review_segments(payload: dict[str, Any], review_settings: dict[str, An
             if not normalized:
                 return []
             best = max(normalized, key=lambda segment: float(segment.get("score", 0.0)))
-            center = (float(best["start_seconds"]) + float(best["end_seconds"])) / 2.0
             target_seconds = max(5.0, float(review_settings["target_seconds"]))
-            video_duration = float(payload["video"].get("duration_seconds", center + target_seconds))
+            source_start_hint = float(best["start_seconds"])
+            source_end_hint = float(best["end_seconds"])
+            best_index = int(best.get("segment_index", -1))
+            if 0 <= best_index < len(raw_segments):
+                raw_best = raw_segments[best_index]
+                if "source_start_seconds" in raw_best and "source_end_seconds" in raw_best:
+                    source_start_hint = float(raw_best["source_start_seconds"])
+                    source_end_hint = float(raw_best["source_end_seconds"])
+            center = (source_start_hint + source_end_hint) / 2.0
+            video_duration = float(payload["video"].get("duration_seconds", source_end_hint + target_seconds))
             source_start = max(0.0, center - (target_seconds / 2.0))
             source_end = min(video_duration, source_start + target_seconds)
             source_start = max(0.0, source_end - target_seconds)
