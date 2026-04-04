@@ -903,6 +903,29 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--skip-review", action="store_true", help="Render directly from analysis.json.")
     run_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
+    temporal_parser = subparsers.add_parser(
+        "temporal",
+        help="Build temporal candidate/window analysis artifacts and a refined 30s highlight proposal.",
+    )
+    temporal_parser.add_argument("--input", required=True, help="Path to analysis.json.")
+    temporal_parser.add_argument("--output-dir", help="Destination directory for temporal artifacts.")
+    temporal_parser.add_argument("--top-k", type=int, default=5, help="Top coarse candidate segments to analyze.")
+    temporal_parser.add_argument("--window-seconds", type=float, default=3.0, help="Temporal window size in seconds.")
+    temporal_parser.add_argument("--window-stride", type=float, default=1.5, help="Sliding-window stride in seconds.")
+    temporal_parser.add_argument(
+        "--contact-sheet-frames",
+        type=int,
+        default=6,
+        help="Frames per contact sheet. Keep this small so each frame remains readable.",
+    )
+    temporal_parser.add_argument(
+        "--final-duration-seconds",
+        type=float,
+        default=30.0,
+        help="Duration for the refined final highlight proposal.",
+    )
+    temporal_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+
     return parser.parse_args()
 
 
@@ -1775,6 +1798,224 @@ def write_infer_outputs(
     return analysis_path
 
 
+def _safe_mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return float(sum(values) / len(values))
+
+
+def build_coarse_candidate_segments(
+    *,
+    records: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, segment in enumerate(segments, start=1):
+        start = float(segment["start_seconds"])
+        end = float(segment["end_seconds"])
+        segment_records = [record for record in records if start <= float(record["timestamp_seconds"]) <= end]
+        motion_values = [float(record.get("frame_diff", 0.0)) for record in segment_records]
+        keep_scores = [float(record.get("score", 0.0)) for record in segment_records if bool(record.get("keep", False))]
+        coarse_score = max(0.0, min(10.0, _safe_mean(keep_scores) * 10.0))
+        scene_change = max(0.0, min(10.0, _safe_mean(motion_values) / 3.0))
+        labels: dict[str, int] = {}
+        for record in segment_records:
+            for label in record.get("labels", []):
+                label_key = str(label).strip()
+                if not label_key:
+                    continue
+                labels[label_key] = labels.get(label_key, 0) + 1
+        top_labels = [item[0] for item in sorted(labels.items(), key=lambda item: (-item[1], item[0]))[:3]]
+        candidates.append(
+            {
+                "segment_id": f"seg_{index:04d}",
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "coarse_score": round(coarse_score, 3),
+                "labels": top_labels,
+                "signals": {
+                    "motion": round(scene_change, 3),
+                    "scene_change": round(scene_change, 3),
+                    "audio_peak": 0.0,
+                },
+            }
+        )
+    return sorted(candidates, key=lambda item: float(item["coarse_score"]), reverse=True)
+
+
+def build_contact_sheet(
+    *,
+    window_records: list[dict[str, Any]],
+    output_path: Path,
+    frames_per_sheet: int,
+) -> str:
+    frames_per_sheet = max(2, min(8, int(frames_per_sheet)))
+    if not window_records:
+        return ""
+    stride = max(1, len(window_records) // frames_per_sheet)
+    sampled = window_records[::stride][:frames_per_sheet]
+    images: list[Image.Image] = []
+    timestamps: list[float] = []
+    for record in sampled:
+        image_path = str(record.get("image_path", "")).strip()
+        if not image_path:
+            continue
+        path = Path(image_path)
+        if not path.exists():
+            continue
+        images.append(Image.open(path).convert("RGB"))
+        timestamps.append(float(record.get("timestamp_seconds", 0.0)))
+    if not images:
+        return ""
+
+    tile_w = min(image.width for image in images)
+    tile_h = min(image.height for image in images)
+    cols = min(3, len(images))
+    rows = (len(images) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * tile_w, rows * tile_h), (0, 0, 0))
+    for index, image in enumerate(images):
+        resized = image.resize((tile_w, tile_h), Image.Resampling.LANCZOS)
+        x = (index % cols) * tile_w
+        y = (index // cols) * tile_h
+        sheet.paste(resized, (x, y))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output_path, format="JPEG", quality=90)
+    return str(output_path)
+
+
+def build_temporal_windows(
+    *,
+    records: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    output_dir: Path,
+    top_k: int,
+    window_seconds: float,
+    window_stride: float,
+    contact_sheet_frames: int,
+) -> list[dict[str, Any]]:
+    temporal_windows: list[dict[str, Any]] = []
+    top_candidates = candidates[: max(1, int(top_k))]
+    for candidate in top_candidates:
+        segment_start = float(candidate["start"])
+        segment_end = float(candidate["end"])
+        current_start = segment_start
+        while current_start < segment_end:
+            current_end = min(segment_end, current_start + window_seconds)
+            if current_end - current_start < min(1.0, window_seconds):
+                break
+            window_records = [record for record in records if current_start <= float(record["timestamp_seconds"]) <= current_end]
+            if not window_records:
+                current_start += window_stride
+                continue
+            keep_scores = [float(record.get("score", 0.0)) for record in window_records if bool(record.get("keep", False))]
+            motion_values = [float(record.get("frame_diff", 0.0)) for record in window_records]
+            window_score = min(10.0, (_safe_mean(keep_scores) * 6.0) + (min(10.0, _safe_mean(motion_values) / 3.0) * 0.4))
+            peak_record = max(window_records, key=lambda record: float(record.get("score", 0.0)))
+            label_counts: dict[str, int] = {}
+            for record in window_records:
+                for label in record.get("labels", []):
+                    key = str(label).strip()
+                    if not key:
+                        continue
+                    label_counts[key] = label_counts.get(key, 0) + 1
+            top_label = sorted(label_counts.items(), key=lambda item: (-item[1], item[0]))[0][0] if label_counts else "highlight"
+            window_stem = f"{candidate['segment_id']}_{int(round(current_start * 1000)):07d}_{int(round(current_end * 1000)):07d}.jpg"
+            contact_sheet_path = build_contact_sheet(
+                window_records=window_records,
+                output_path=output_dir / "contact_sheets" / window_stem,
+                frames_per_sheet=contact_sheet_frames,
+            )
+            temporal_windows.append(
+                {
+                    "segment_id": candidate["segment_id"],
+                    "window_start": round(current_start, 3),
+                    "window_end": round(current_end, 3),
+                    "event": f"{top_label.replace('_', ' ')} sequence",
+                    "change_summary": "motion/score trend derived from frame-level candidate signals",
+                    "peak_time": [
+                        round(float(peak_record.get("timestamp_seconds", current_start)), 3),
+                        round(float(peak_record.get("timestamp_seconds", current_start)), 3),
+                    ],
+                    "score": round(window_score, 3),
+                    "recommended": bool(window_score >= 6.5),
+                    "contact_sheet_path": contact_sheet_path,
+                }
+            )
+            current_start += max(0.5, window_stride)
+    return sorted(temporal_windows, key=lambda item: float(item["score"]), reverse=True)
+
+
+def refine_final_highlight(
+    *,
+    windows: list[dict[str, Any]],
+    video_duration_seconds: float,
+    final_duration_seconds: float,
+) -> dict[str, Any]:
+    if not windows:
+        return {
+            "highlight_id": "hl_0001",
+            "source_start": 0.0,
+            "source_end": min(round(float(video_duration_seconds), 3), round(float(final_duration_seconds), 3)),
+            "duration": round(min(float(video_duration_seconds), float(final_duration_seconds)), 3),
+            "score": 0.0,
+            "reason": "fallback: no recommended temporal window available",
+            "subtitle_mode": "human",
+        }
+    best = windows[0]
+    peak_center = _safe_mean([float(value) for value in best.get("peak_time", [])])
+    desired_duration = max(5.0, float(final_duration_seconds))
+    start = max(0.0, peak_center - (desired_duration / 2.0))
+    end = min(float(video_duration_seconds), start + desired_duration)
+    start = max(0.0, end - desired_duration)
+    return {
+        "highlight_id": "hl_0001",
+        "source_start": round(start, 3),
+        "source_end": round(end, 3),
+        "duration": round(end - start, 3),
+        "score": round(float(best.get("score", 0.0)), 3),
+        "reason": "top temporal window with strongest combined action and continuity signals",
+        "subtitle_mode": "human",
+    }
+
+
+def command_temporal(args: argparse.Namespace) -> int:
+    configure_logging(args.log_level)
+    input_path = Path(args.input).expanduser().resolve()
+    payload = json.loads(input_path.read_text(encoding="utf-8"))
+    if "frames" not in payload or "segments" not in payload:
+        raise ValueError(f"{input_path} must be an infer analysis.json containing frames and segments.")
+    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    records = list(payload["frames"])
+    segments = list(payload["segments"])
+    candidates = build_coarse_candidate_segments(records=records, segments=segments)
+    windows = build_temporal_windows(
+        records=records,
+        candidates=candidates,
+        output_dir=output_dir,
+        top_k=int(args.top_k),
+        window_seconds=float(args.window_seconds),
+        window_stride=float(args.window_stride),
+        contact_sheet_frames=int(args.contact_sheet_frames),
+    )
+    final_highlight = refine_final_highlight(
+        windows=windows,
+        video_duration_seconds=float(payload["video"]["duration_seconds"]),
+        final_duration_seconds=float(args.final_duration_seconds),
+    )
+
+    candidate_path = output_dir / "candidate_segments.json"
+    windows_path = output_dir / "temporal_windows.json"
+    final_path = output_dir / "highlight.final.json"
+    candidate_path.write_text(json.dumps({"segments": candidates}, ensure_ascii=False, indent=2), encoding="utf-8")
+    windows_path.write_text(json.dumps({"windows": windows}, ensure_ascii=False, indent=2), encoding="utf-8")
+    final_path.write_text(json.dumps(final_highlight, ensure_ascii=False, indent=2), encoding="utf-8")
+    logging.info("Wrote %s", candidate_path)
+    logging.info("Wrote %s", windows_path)
+    logging.info("Wrote %s", final_path)
+    return 0
+
+
 def extract_gemini_batch_response_text(response_payload: dict[str, Any]) -> str:
     if not isinstance(response_payload, dict):
         return ""
@@ -2563,6 +2804,17 @@ def command_run(args: argparse.Namespace) -> int:
 
         command_extract(video_args)
         command_infer(video_args)
+        temporal_args = argparse.Namespace(
+            input=str(video_output_dir / "analysis.json"),
+            output_dir=str(video_output_dir),
+            top_k=5,
+            window_seconds=3.0,
+            window_stride=1.5,
+            contact_sheet_frames=6,
+            final_duration_seconds=float(args.target_seconds or config["review"]["target_seconds"]),
+            log_level=args.log_level,
+        )
+        command_temporal(temporal_args)
 
         if bool(getattr(args, "skip_review", False)):
             render_input = video_output_dir / "analysis.json"
@@ -2636,6 +2888,8 @@ def main() -> int:
         return command_render(args)
     if args.command == "run":
         return command_run(args)
+    if args.command == "temporal":
+        return command_temporal(args)
     if args.command == "edit":
         if args.edit_command == "update-segment":
             return command_edit_update_segment(args)
