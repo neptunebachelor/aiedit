@@ -14,12 +14,13 @@ There are four primary stages:
 
 1. `extract`
 2. `infer`
-3. `review`
-4. `render`
+3. `temporal`
+4. `review`
+5. `render`
 
 And one utility stage:
 
-5. `edit`
+6. `edit`
 
 ## Stage 1: Extract
 
@@ -146,7 +147,38 @@ When async batch mode is used, `infer` writes `analysis.batch.json` first and `c
 
 `segments.raw.srt` stays on the original source-video timeline.
 
-## Stage 3: Review
+## Stage 3: Temporal
+
+Goal:
+
+- convert coarse frame-level infer outputs into structured temporal-window analysis
+- emit candidate segments and window-level scores
+- generate contact sheets for top windows
+- produce a refined 30s final highlight proposal (`highlight.final.json`)
+
+Example:
+
+```bash
+python pipeline.py temporal \
+  --input ./output/lap01/analysis.json \
+  --top-k 5 \
+  --window-seconds 3 \
+  --window-stride 1.5 \
+  --contact-sheet-frames 6 \
+  --final-duration-seconds 30
+```
+
+Outputs:
+
+```text
+output/<video_stem>/
+|-- candidate_segments.json
+|-- temporal_windows.json
+|-- highlight.final.json
+`-- contact_sheets/
+```
+
+## Stage 4: Review
 
 Goal:
 
@@ -204,7 +236,7 @@ Semantics:
 - `*.source.srt` stays on the original source timeline
 - `*.editable.json` is the file meant for user intervention
 
-## Stage 4: Render
+## Stage 5: Render
 
 Goal:
 
@@ -252,7 +284,7 @@ output/<video_stem>/
 `-- lap01_final_parts/
 ```
 
-## Stage 5: Edit
+## Stage 6: Edit
 
 Goal:
 

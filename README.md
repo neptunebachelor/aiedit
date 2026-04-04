@@ -12,15 +12,17 @@ python pipeline.py <stage> ...
 
 ## Stages
 
-The pipeline is split into four explicit stages:
+The pipeline is split into five explicit stages:
 
 1. `extract`
    Turn a video into LLM-ready images.
 2. `infer`
    Send extracted frames to either a local Ollama model or an API model with automatic routing.
-3. `review`
+3. `temporal`
+   Build temporal-window artifacts (`candidate_segments.json`, `temporal_windows.json`, `highlight.final.json`) and contact sheets.
+4. `review`
    Build a reviewable edit plan, source/final SRT files, and an optional preview video.
-4. `render`
+5. `render`
    Cut and concatenate the final MP4 with ffmpeg.
 
 There is also an `edit` utility stage for patching an editable review plan:
@@ -30,7 +32,7 @@ There is also an `edit` utility stage for patching an editable review plan:
 
 And a one-shot stage:
 
-- `run` (extract -> infer -> review -> render)
+- `run` (extract -> infer -> temporal -> review -> render)
 
 ## Setup
 
@@ -122,7 +124,28 @@ python pipeline.py collect \
   --manifest ./output/lap01/analysis.batch.json
 ```
 
-### 3. Review and preview
+### 3. Temporal analysis (recommended)
+
+```bash
+python pipeline.py temporal \
+  --input ./output/lap01/analysis.json \
+  --top-k 5 \
+  --window-seconds 3 \
+  --window-stride 1.5 \
+  --contact-sheet-frames 6
+```
+
+This writes:
+
+```text
+output/lap01/
+|-- candidate_segments.json
+|-- temporal_windows.json
+|-- highlight.final.json
+`-- contact_sheets/
+```
+
+### 4. Review and preview
 
 ```bash
 python pipeline.py review \
@@ -151,7 +174,7 @@ Preview resolutions:
 - `1080p`
 - `source`
 
-### 4. Patch the plan if needed
+### 5. Patch the plan if needed
 
 Change a source cut:
 
@@ -173,7 +196,7 @@ python pipeline.py edit update-caption \
   --caption-detail "Close to the tyre wall."
 ```
 
-### 5. Render the final video
+### 6. Render the final video
 
 ```bash
 python pipeline.py render \
