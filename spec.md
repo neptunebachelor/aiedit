@@ -408,6 +408,106 @@ Short-term implementation priority:
 3. add boundary refinement pass near the peak window
 4. keep single-frame inference available as a fallback, not as the main ranking path
 
+### MVP Scope (Approved)
+
+The first deliverable should focus on a practical end-to-end MVP with the minimum set of features needed for quality validation:
+
+1. coarse segment scoring on the full video (motion / frame-diff first)
+2. Top-K candidate selection
+3. temporal window analysis using contact sheets
+4. peak-centered boundary refinement
+5. final highlight JSON + review-compatible outputs
+
+What is explicitly out of MVP:
+
+- advanced OCR / ASR signals
+- complex learned ranking models
+- multi-highlight playlist generation
+- provider-specific optimization beyond basic routing and fallback
+
+### MVP Parameter Defaults
+
+To avoid ambiguity during implementation, the default parameters for MVP should be:
+
+- segment length target: `4s` to `8s` natural segments
+- Top-K candidate segments: `K = min(12, max(4, floor(duration_minutes * 3)))`
+- temporal windows: `2s`, `3s`, `5s`
+- window stride: `1s` (for 2s/3s windows), `2s` (for 5s windows)
+- contact-sheet frames per window: `4` to `6` (default `5`)
+- boundary refinement expansion: `±3s` around the best peak window
+- refinement sampling density: approximately `2x` MVP coarse density near peak
+
+### Deterministic Selection and De-dup
+
+When multiple candidates overlap heavily, apply deterministic de-dup:
+
+- define temporal IoU between two windows
+- if IoU `>= 0.5`, keep the one with higher fused score
+- if fused scores are equal, keep the earlier window
+
+This ensures stable reruns and cleaner review outputs.
+
+### Fused Ranking (MVP Formula)
+
+Use an explicit weighted score for ranking:
+
+`final_score = 0.45 * coarse_score + 0.45 * llm_score + 0.10 * readability_score`
+
+Where:
+
+- `coarse_score`: normalized cheap-signal score
+- `llm_score`: structured score returned from temporal window analysis
+- `readability_score`: heuristic penalty/bonus (blur, visibility, subject clarity)
+
+All component scores should be normalized to `[0, 10]`.
+
+### Failure Handling and Fallback
+
+MVP must define strict fallback behavior:
+
+1. if contact-sheet LLM call fails (timeout / parse error), retry once
+2. if retry fails, fallback to single-frame inference for that window
+3. if LLM is fully unavailable, rank by coarse score only and mark run as degraded
+4. all fallback events must be recorded in run artifacts
+
+### Output Contract Additions (MVP)
+
+Add the following fields to top-level output artifacts:
+
+- `schema_version` (e.g. `highlight.v1`)
+- `prompt_version`
+- `ranking_version` (e.g. `mvp_fused_v1`)
+- `degraded_mode` (boolean)
+- `stats`:
+  - `segments_total`
+  - `segments_topk`
+  - `windows_total`
+  - `windows_llm_success`
+  - `windows_llm_fallback`
+  - `pipeline_latency_ms`
+
+### Offline Evaluation Protocol (Required for MVP Acceptance)
+
+MVP should not be considered complete without a basic offline evaluation pass.
+
+Minimum evaluation set:
+
+- at least `20` source videos
+- each video with one human-annotated preferred 30s highlight interval
+
+Primary metrics:
+
+- peak alignment error (seconds)
+- highlight overlap IoU vs human interval
+- review accept rate (binary human pass/fail)
+- average processing latency per minute of source video
+
+Acceptance target (initial):
+
+- median peak alignment error `<= 3.0s`
+- median overlap IoU `>= 0.35`
+- review accept rate `>= 60%`
+
 ---
 
 ## Summary
