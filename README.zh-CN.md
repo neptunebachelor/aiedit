@@ -78,6 +78,14 @@ python pipeline.py review \
   --caption-mode human \
   --preview \
   --preview-resolution 720p
+
+# 连续 30s 单段（不拼接碎片）
+python pipeline.py review \
+  --input ./output/lap01/analysis.json \
+  --target-seconds 30 \
+  --selection-mode single_continuous \
+  --single-top-k 5 \
+  --caption-mode human
 ```
 
 这一步会输出：
@@ -163,6 +171,20 @@ python pipeline.py render \
 - 单段片段时长限制
 - 预览分辨率
 - 最终渲染分辨率
+
+### 中途更换模型并继续推理
+
+`infer` 阶段会把已完成帧写入 `output/<video>/frame_decisions.checkpoint.jsonl`。同一个视频再次执行 `infer` 时会自动跳过已完成帧，只处理剩余帧，所以你可以中途换模型继续跑：
+
+```bash
+python pipeline.py infer --video ./input/lap01.mp4 --provider api --model gpt-4.1-mini
+```
+
+如果你希望全部帧都用新模型重跑（不复用旧结果），请加 `--restart`：
+
+```bash
+python pipeline.py infer --video ./input/lap01.mp4 --provider api --model gpt-4.1-mini --restart
+```
 
 ## 输出文件
 
