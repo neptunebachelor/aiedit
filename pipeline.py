@@ -129,6 +129,8 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
     "selection": copy.deepcopy(LEGACY_DEFAULT_CONFIG["decision"]),
     "review": {
         "target_seconds": 30.0,
+        "selection_mode": "montage",
+        "single_top_k": 5,
         "clip_before": 1.0,
         "clip_after": 2.0,
         "cluster_gap": 2.0,
@@ -769,6 +771,12 @@ def parse_args() -> argparse.Namespace:
     review_parser.add_argument("--output-dir", help="Destination directory for review outputs.")
     review_parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
     review_parser.add_argument("--target-seconds", type=float, help="Target total duration for the compact plan.")
+    review_parser.add_argument(
+        "--selection-mode",
+        choices=["montage", "single_continuous"],
+        help="montage stitches multiple short clips; single_continuous returns one contiguous clip.",
+    )
+    review_parser.add_argument("--single-top-k", type=int, help="Top-K coarse segments considered in single_continuous mode.")
     review_parser.add_argument("--clip-before", type=float, help="Seconds kept before each highlight anchor.")
     review_parser.add_argument("--clip-after", type=float, help="Seconds kept after each highlight anchor.")
     review_parser.add_argument("--cluster-gap", type=float, help="Maximum gap between timestamps before split.")
@@ -880,6 +888,12 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--jpeg-quality", type=int, help="JPEG quality used when writing extracted frames.")
     run_parser.add_argument("--resize-for-llm", type=int, help="Maximum output dimension for extracted frames.")
     run_parser.add_argument("--target-seconds", type=float, help="Target total duration for the compact plan.")
+    run_parser.add_argument(
+        "--selection-mode",
+        choices=["montage", "single_continuous"],
+        help="montage stitches multiple short clips; single_continuous returns one contiguous clip.",
+    )
+    run_parser.add_argument("--single-top-k", type=int, help="Top-K coarse segments considered in single_continuous mode.")
     run_parser.add_argument("--clip-before", type=float, help="Seconds kept before each highlight anchor.")
     run_parser.add_argument("--clip-after", type=float, help="Seconds kept after each highlight anchor.")
     run_parser.add_argument("--cluster-gap", type=float, help="Maximum gap between timestamps before split.")
@@ -2273,6 +2287,10 @@ def resolve_review_settings(config: dict[str, Any], args: argparse.Namespace) ->
     review = copy.deepcopy(config["review"])
     if getattr(args, "target_seconds", None) is not None:
         review["target_seconds"] = float(args.target_seconds)
+    if getattr(args, "selection_mode", None):
+        review["selection_mode"] = str(args.selection_mode)
+    if getattr(args, "single_top_k", None) is not None:
+        review["single_top_k"] = max(1, int(args.single_top_k))
     if getattr(args, "clip_before", None) is not None:
         review["clip_before"] = float(args.clip_before)
     if getattr(args, "clip_after", None) is not None:
@@ -2348,6 +2366,97 @@ def apply_caption_mode(segments: list[dict[str, Any]], caption_mode: str) -> lis
 
 
 def build_review_segments(payload: dict[str, Any], review_settings: dict[str, Any]) -> list[dict[str, Any]]:
+    selection_mode = str(review_settings.get("selection_mode", "montage")).strip().lower()
+    if selection_mode == "single_continuous":
+        records = list(payload.get("frames", []))
+        raw_segments = list(payload["segments"])
+        normalized = [normalize_review_segment(segment, index) for index, segment in enumerate(raw_segments)]
+        if records:
+            coarse_candidates = build_coarse_candidate_segments(records=records, segments=raw_segments)
+            top_k = max(1, int(review_settings.get("single_top_k", 5)))
+            target_seconds = max(5.0, float(review_settings["target_seconds"]))
+            temporal_windows: list[dict[str, Any]] = []
+            for candidate in coarse_candidates[:top_k]:
+                center = (float(candidate["start"]) + float(candidate["end"])) / 2.0
+                source_start = max(0.0, center - (target_seconds / 2.0))
+                source_end = min(float(payload["video"]["duration_seconds"]), source_start + target_seconds)
+                source_start = max(0.0, source_end - target_seconds)
+                window_records = [
+                    record
+                    for record in records
+                    if source_start <= float(record.get("timestamp_seconds", 0.0)) <= source_end
+                ]
+                keep_scores = [float(record.get("score", 0.0)) for record in window_records if bool(record.get("keep", False))]
+                motion_values = [float(record.get("frame_diff", 0.0)) for record in window_records]
+                window_score = min(10.0, (_safe_mean(keep_scores) * 6.0) + (min(10.0, _safe_mean(motion_values) / 3.0) * 0.4))
+                temporal_windows.append(
+                    {
+                        "segment_id": candidate["segment_id"],
+                        "window_start": round(source_start, 3),
+                        "window_end": round(source_end, 3),
+                        "peak_time": [round(center, 3), round(center, 3)],
+                        "score": round(window_score, 3),
+                        "recommended": True,
+                    }
+                )
+            refined = refine_final_highlight(
+                windows=temporal_windows,
+                video_duration_seconds=float(payload["video"]["duration_seconds"]),
+                final_duration_seconds=target_seconds,
+            )
+            source_start = float(refined["source_start"])
+            source_end = float(refined["source_end"])
+            matched = [
+                segment
+                for segment in normalized
+                if float(segment["end_seconds"]) > source_start and float(segment["start_seconds"]) < source_end
+            ]
+            label_counts: dict[str, int] = {}
+            reasons: list[str] = []
+            for segment in matched:
+                for label in segment.get("labels", []):
+                    label_counts[str(label)] = label_counts.get(str(label), 0) + 1
+                reason = str(segment.get("reason", "")).strip()
+                if reason:
+                    reasons.append(reason)
+            labels = [item[0] for item in sorted(label_counts.items(), key=lambda item: (-item[1], item[0]))[:3]]
+            reason_text = str(refined.get("reason", "")).strip() or (reasons[0] if reasons else "single continuous highlight")
+            score = max(0.0, min(1.0, float(refined.get("score", 0.0)) / 10.0))
+        else:
+            if not normalized:
+                return []
+            best = max(normalized, key=lambda segment: float(segment.get("score", 0.0)))
+            center = (float(best["start_seconds"]) + float(best["end_seconds"])) / 2.0
+            target_seconds = max(5.0, float(review_settings["target_seconds"]))
+            video_duration = float(payload["video"].get("duration_seconds", center + target_seconds))
+            source_start = max(0.0, center - (target_seconds / 2.0))
+            source_end = min(video_duration, source_start + target_seconds)
+            source_start = max(0.0, source_end - target_seconds)
+            labels = list(best.get("labels", []))
+            reason_text = str(best.get("reason", "")).strip() or "single continuous highlight"
+            score = float(best.get("score", 0.0))
+
+        duration = round(max(0.0, source_end - source_start), 3)
+        segments = [
+            {
+                "rank": 1,
+                "start_seconds": 0.0,
+                "end_seconds": duration,
+                "duration_seconds": duration,
+                "source_start_seconds": round(source_start, 3),
+                "source_end_seconds": round(source_end, 3),
+                "timeline_start_seconds": 0.0,
+                "timeline_end_seconds": duration,
+                "score": round(score, 3),
+                "labels": labels,
+                "reason": reason_text,
+                "hit_count": 1,
+                "anchor_seconds": round(source_start + (duration / 2.0), 3),
+                "source_segment_index": 0,
+            }
+        ]
+        return apply_caption_mode(segments, str(review_settings["caption_mode"]))
+
     raw_segments = list(payload["segments"])
     if raw_segments and "source_start_seconds" in raw_segments[0] and "source_end_seconds" in raw_segments[0]:
         segments = normalize_prebuilt_segments(raw_segments)
@@ -2400,6 +2509,8 @@ def write_review_outputs(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target_seconds": round(float(review_settings["target_seconds"]), 3),
         "actual_seconds": actual_seconds,
+        "selection_mode": str(review_settings.get("selection_mode", "montage")),
+        "single_top_k": int(review_settings.get("single_top_k", 5)),
         "caption_mode": str(review_settings["caption_mode"]),
         "segments": segments,
     }
