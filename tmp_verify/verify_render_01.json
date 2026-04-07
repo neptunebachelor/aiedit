@@ -1,0 +1,41 @@
+{
+  "stage": "render_plan",
+  "video": {
+    "source_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\input\\VID_20260315_164002_00_021_205502.mp4",
+    "filename": "VID_20260315_164002_00_021_205502.mp4",
+    "fps": 29.97002997002997,
+    "frame_count": 4871,
+    "duration_seconds": 162.529
+  },
+  "source_input": "C:\\Users\\neptu\\Documents\\Projects\\New project\\output\\VID_20260315_164002_00_021_205502\\analysis.json",
+  "generated_at": "2026-04-07T07:21:05.536669+00:00",
+  "actual_seconds": 30.0,
+  "render": {
+    "resolution": "540p",
+    "crf": 18,
+    "preset": "fast"
+  },
+  "segments": [
+    {
+      "rank": 1,
+      "start_seconds": 0.0,
+      "end_seconds": 30.0,
+      "duration_seconds": 30.0,
+      "source_start_seconds": 0.0,
+      "source_end_seconds": 30.0,
+      "timeline_start_seconds": 0.0,
+      "timeline_end_seconds": 30.0,
+      "score": 1.0,
+      "labels": [
+        "bend",
+        "scenery"
+      ],
+      "reason": "Obvious bend with strong scenic backdrop (green hills, clear sky)",
+      "hit_count": 1,
+      "anchor_seconds": 5.005,
+      "source_segment_index": 0,
+      "caption": "这段压弯节奏太顺了",
+      "caption_detail": "看点:Obvious bend with strong scenic backdrop (green hills, clear sky)"
+    }
+  ]
+}

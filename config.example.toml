@@ -23,6 +23,7 @@ temperature = 0.1
 timeout_seconds = 120
 
 [prompt]
+preset = "default"
 positive_labels = [
   "bend",
   "scenery",
@@ -41,6 +42,9 @@ negative_labels = [
   "blur",
   "low_value_straight",
 ]
+extra_positive_labels = []
+extra_negative_labels = []
+extra_instructions = ""
 system_instructions = """
 You review forward-fixed motorcycle footage exported from Insta360 Studio.
 Keep only visually valuable moments for a short-form highlight edit.
@@ -118,6 +122,7 @@ json_output = true
 
 [review]
 target_seconds = 30.0
+top_highlights = 1
 clip_before = 1.0
 clip_after = 2.0
 cluster_gap = 2.0
@@ -125,6 +130,10 @@ min_clip_seconds = 2.0
 max_clip_seconds = 6.0
 max_clips_per_source_segment = 2
 caption_mode = "human"
+caption_style = "default"
+caption_prefix = ""
+caption_suffix = ""
+caption_detail_prefix = ""
 
 [preview]
 enabled = false

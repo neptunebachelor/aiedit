@@ -1,0 +1,31 @@
+{
+  "stage": "review_index",
+  "generated_at": "2026-04-07T07:19:54.419176+00:00",
+  "variant_count": 3,
+  "variants": [
+    {
+      "index": 1,
+      "stem": "verify_top_01",
+      "review_json": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_01.review.json",
+      "editable_json": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_01.editable.json",
+      "final_srt": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_01.final.srt",
+      "source_srt": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_01.source.srt"
+    },
+    {
+      "index": 2,
+      "stem": "verify_top_02",
+      "review_json": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_02.review.json",
+      "editable_json": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_02.editable.json",
+      "final_srt": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_02.final.srt",
+      "source_srt": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_02.source.srt"
+    },
+    {
+      "index": 3,
+      "stem": "verify_top_03",
+      "review_json": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_03.review.json",
+      "editable_json": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_03.editable.json",
+      "final_srt": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_03.final.srt",
+      "source_srt": "C:\\Users\\neptu\\Documents\\Projects\\New project\\tmp_verify\\verify_top_03.source.srt"
+    }
+  ]
+}
