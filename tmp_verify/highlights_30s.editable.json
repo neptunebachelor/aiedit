@@ -1,0 +1,33 @@
+{
+  "video": {
+    "source_path": "C:\\Users\\neptu\\insta360\\素材\\VID_20250914_105810_00_001_003_214808.mp4",
+    "filename": "VID_20250914_105810_00_001_003_214808.mp4",
+    "fps": 29.97002997002997,
+    "frame_count": 1704,
+    "duration_seconds": 56.857,
+    "width": 3840,
+    "height": 2160
+  },
+  "source_input": "C:\\Users\\neptu\\insta360\\素材\\VID_20250914_105810_00_001_003_214808\\analysis.json",
+  "generated_at": "2026-04-02T08:03:30.934862+00:00",
+  "target_seconds": 5.0,
+  "mode": "editable_review_plan",
+  "segments": [
+    {
+      "rank": 1,
+      "start_seconds": 0.0,
+      "end_seconds": 5.0,
+      "duration_seconds": 5.0,
+      "source_start_seconds": 0.0,
+      "source_end_seconds": 5.0,
+      "score": 0.01,
+      "labels": [
+        "fallback_intro"
+      ],
+      "reason": "No highlights were selected automatically; using the opening seconds as a fallback clip.",
+      "caption": "Opening seconds",
+      "caption_detail": "Fallback clip because no highlights were detected",
+      "notes": ""
+    }
+  ]
+}
