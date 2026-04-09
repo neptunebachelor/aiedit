@@ -34,6 +34,10 @@ And a one-shot stage:
 
 - `run` (extract -> infer -> temporal -> review -> render)
 
+`run`, `review`, and `render` can now emit multiple 30-second highlight variants with `--top-highlights N`.
+`infer` and `run` also support prompt overrides such as `--prompt-preset douyin_riding`, while `review` and `render`
+support caption styling such as `--caption-style douyin`.
+
 ## Setup
 
 1. Install Python 3.12+.
@@ -143,6 +147,18 @@ output/lap01/
 |-- temporal_windows.json
 |-- highlight.final.json
 `-- contact_sheets/
+```
+
+### 4. One-shot top-5 short-video workflow
+
+```bash
+python pipeline.py run \
+  --video ./input/ride01.mp4 \
+  --selection-mode single_continuous \
+  --top-highlights 5 \
+  --prompt-preset douyin_riding \
+  --prompt-extra-positive-labels apex,close_pass,speed_sensation \
+  --caption-style douyin
 ```
 
 ### 4. Review and preview

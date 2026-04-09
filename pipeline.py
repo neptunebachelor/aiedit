@@ -8,6 +8,8 @@ import io
 import json
 import logging
 import os
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,6 +36,7 @@ except ImportError:  # pragma: no cover
 
 from analyze_video import (
     DEFAULT_CONFIG as LEGACY_DEFAULT_CONFIG,
+    build_system_prompt,
     build_user_prompt,
     compute_metrics,
     deep_merge_dict,
@@ -131,6 +134,7 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
         "target_seconds": 30.0,
         "selection_mode": "montage",
         "single_top_k": 5,
+        "top_highlights": 1,
         "clip_before": 1.0,
         "clip_after": 2.0,
         "cluster_gap": 2.0,
@@ -138,6 +142,10 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
         "max_clip_seconds": 6.0,
         "max_clips_per_source_segment": 2,
         "caption_mode": "human",
+        "caption_style": "default",
+        "caption_prefix": "",
+        "caption_suffix": "",
+        "caption_detail_prefix": "",
         "emit_source_srt": True,
         "emit_final_srt": True,
     },
@@ -177,6 +185,28 @@ HUMAN_LABELS = {
     "formation_lap": "formation lap",
     "slow_straight": "slow straight",
     "low_value_track": "low-value track section",
+}
+
+DOUYIN_LABELS = {
+    "bend": "连续压弯",
+    "scenery": "风景拉满",
+    "traffic": "车流穿插",
+    "overtake": "贴车超车",
+    "close_pass": "贴身擦过",
+    "group_ride": "编队骑行",
+    "tunnel_transition": "出隧道变光",
+    "water_view": "水边风景",
+    "mountain_view": "山路视角",
+    "sunset": "落日氛围",
+    "corner_entry": "入弯瞬间",
+    "apex": "贴弯 apex",
+    "corner_exit": "出弯提速",
+    "full_throttle": "油门拉满",
+    "high_speed": "速度感上来",
+    "speed_sensation": "速度感拉满",
+    "late_braking": "重刹进弯",
+    "handlebar_wobble": "车把晃动",
+    "near_barrier": "贴近边墙",
 }
 
 RESOLUTION_HEIGHTS = {
@@ -350,7 +380,7 @@ class OllamaVisionProvider:
             "messages": [
                 {
                     "role": "system",
-                    "content": config["prompt"]["system_instructions"],
+                    "content": build_system_prompt(config),
                 },
                 {
                     "role": "user",
@@ -428,7 +458,7 @@ class OpenAICompatibleVisionProvider:
             "messages": [
                 {
                     "role": "system",
-                    "content": config["prompt"]["system_instructions"],
+                    "content": build_system_prompt(config),
                 },
                 {
                     "role": "user",
@@ -468,7 +498,7 @@ class GeminiBatchVisionProvider:
             "system_instruction": {
                 "parts": [
                     {
-                        "text": str(prompt_snapshot["system_instructions"]),
+                        "text": build_system_prompt({"prompt": prompt_snapshot}),
                     }
                 ]
             },
@@ -732,6 +762,7 @@ def parse_args() -> argparse.Namespace:
     extract_parser.add_argument("--max-frames", type=int, help="Limit the number of sampled frames.")
     extract_parser.add_argument("--jpeg-quality", type=int, help="JPEG quality used when writing extracted frames.")
     extract_parser.add_argument("--resize-for-llm", type=int, help="Maximum output dimension for extracted frames.")
+    extract_parser.add_argument("--ffmpeg", help="Optional path to ffmpeg executable.")
     extract_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     infer_parser = subparsers.add_parser("infer", help="Run vision-model inference over extracted frames.")
@@ -747,6 +778,7 @@ def parse_args() -> argparse.Namespace:
     infer_parser.add_argument("--api-key", help="API key for third-party providers.")
     infer_parser.add_argument("--api-key-env", help="Environment variable used to read the API key.")
     infer_parser.add_argument("--model", help="Vision model name.")
+    infer_parser.add_argument("--ffmpeg", help="Optional path to ffmpeg executable used if extract runs implicitly.")
     infer_parser.add_argument("--temperature", type=float, help="Sampling temperature for the provider.")
     infer_parser.add_argument("--timeout-seconds", type=float, help="Provider timeout in seconds.")
     infer_parser.add_argument(
@@ -764,6 +796,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Ignore any saved sync infer checkpoint and start from the first candidate frame again.",
     )
+    add_prompt_override_args(infer_parser)
     infer_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     review_parser = subparsers.add_parser("review", help="Build a reviewable edit plan and optional preview.")
@@ -789,6 +822,8 @@ def parse_args() -> argparse.Namespace:
         choices=["score", "reason", "human"],
         help="How the review SRT should be written.",
     )
+    review_parser.add_argument("--top-highlights", type=int, help="Number of 30s highlight variants to emit.")
+    add_caption_style_args(review_parser)
     review_parser.add_argument("--preview", action="store_true", help="Render a low-resolution preview MP4.")
     review_parser.add_argument(
         "--preview-resolution",
@@ -805,12 +840,26 @@ def parse_args() -> argparse.Namespace:
     render_parser.add_argument("--output-dir", help="Destination directory for rendered outputs.")
     render_parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
     render_parser.add_argument("--target-seconds", type=float, help="Target duration when rendering from raw analysis.")
+    render_parser.add_argument(
+        "--selection-mode",
+        choices=["montage", "single_continuous"],
+        help="montage stitches multiple short clips; single_continuous returns one contiguous clip.",
+    )
+    render_parser.add_argument("--single-top-k", type=int, help="Top-K coarse segments considered in single_continuous mode.")
+    render_parser.add_argument("--clip-before", type=float, help="Seconds kept before each highlight anchor.")
+    render_parser.add_argument("--clip-after", type=float, help="Seconds kept after each highlight anchor.")
+    render_parser.add_argument("--cluster-gap", type=float, help="Maximum gap between timestamps before split.")
+    render_parser.add_argument("--min-clip-seconds", type=float, help="Minimum duration for selected clips.")
+    render_parser.add_argument("--max-clip-seconds", type=float, help="Maximum duration for selected clips.")
+    render_parser.add_argument("--max-clips-per-source-segment", type=int, help="Diversity limit per source segment.")
     render_parser.add_argument("--stem", help="Output stem. Defaults to the input stem or highlights_<target>s.")
     render_parser.add_argument(
         "--caption-mode",
         choices=["score", "reason", "human"],
         help="Caption mode used when the input does not already contain captions.",
     )
+    render_parser.add_argument("--top-highlights", type=int, help="Number of 30s highlight variants to render from analysis.json.")
+    add_caption_style_args(render_parser)
     render_parser.add_argument(
         "--resolution",
         choices=sorted(RESOLUTION_HEIGHTS.keys()),
@@ -878,6 +927,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Ignore any saved sync infer checkpoint and start from the first candidate frame again.",
     )
+    add_prompt_override_args(run_parser)
     run_parser.add_argument("--frame-interval-seconds", type=float, help="Sample one frame every N seconds.")
     run_parser.add_argument(
         "--sample-fps",
@@ -905,6 +955,8 @@ def parse_args() -> argparse.Namespace:
         choices=["score", "reason", "human"],
         help="How subtitles should be written for review and render.",
     )
+    run_parser.add_argument("--top-highlights", type=int, help="Number of 30s highlight variants to generate.")
+    add_caption_style_args(run_parser)
     run_parser.add_argument("--stem", help="Output stem for review/render outputs.")
     run_parser.add_argument(
         "--resolution",
@@ -938,6 +990,7 @@ def parse_args() -> argparse.Namespace:
         default=30.0,
         help="Duration for the refined final highlight proposal.",
     )
+    temporal_parser.add_argument("--top-highlights", type=int, default=1, help="Number of top highlight proposals to save.")
     temporal_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     return parser.parse_args()
@@ -947,6 +1000,63 @@ def add_common_video_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--video", required=True, help="Video file or folder.")
     parser.add_argument("--output-root", help="Root directory for pipeline outputs.")
     parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
+
+
+def add_prompt_override_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--prompt-preset",
+        choices=["default", "douyin_riding"],
+        help="Optional prompt preset. douyin_riding biases inference toward short-video-worthy riding moments.",
+    )
+    parser.add_argument(
+        "--prompt-extra-positive-labels",
+        help="Comma-separated labels appended to prompt. Example: apex,close_pass,speed_sensation",
+    )
+    parser.add_argument(
+        "--prompt-extra-negative-labels",
+        help="Comma-separated labels to avoid. Example: parking,long_wait,boring_straight",
+    )
+    parser.add_argument("--prompt-extra-instructions", help="Extra system instructions appended to the prompt.")
+
+
+def add_caption_style_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--caption-style",
+        choices=["default", "douyin"],
+        help="Caption style preset layered on top of caption-mode.",
+    )
+    parser.add_argument("--caption-prefix", help="Optional prefix added to each caption line.")
+    parser.add_argument("--caption-suffix", help="Optional suffix added to each caption line.")
+    parser.add_argument("--caption-detail-prefix", help="Optional prefix added to caption detail lines.")
+
+
+def parse_csv_items(raw_value: Any) -> list[str]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, (list, tuple)):
+        values = raw_value
+    else:
+        values = str(raw_value).split(",")
+    items: list[str] = []
+    for value in values:
+        item = str(value).strip()
+        if item and item not in items:
+            items.append(item)
+    return items
+
+
+def apply_prompt_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
+    prompt = config["prompt"]
+    if getattr(args, "prompt_preset", None):
+        prompt["preset"] = str(args.prompt_preset).strip().lower()
+    extra_positive = parse_csv_items(getattr(args, "prompt_extra_positive_labels", None))
+    if extra_positive:
+        prompt["extra_positive_labels"] = extra_positive
+    extra_negative = parse_csv_items(getattr(args, "prompt_extra_negative_labels", None))
+    if extra_negative:
+        prompt["extra_negative_labels"] = extra_negative
+    if getattr(args, "prompt_extra_instructions", None):
+        prompt["extra_instructions"] = str(args.prompt_extra_instructions).strip()
 
 
 def load_toml(path: Path) -> dict[str, Any]:
@@ -1114,6 +1224,18 @@ def resize_frame(frame: Any, max_dimension: int) -> Any:
     return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
 
 
+def resolve_resize_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
+    if max_dimension <= 0:
+        return width, height
+    longest = max(width, height)
+    if longest <= max_dimension:
+        return width, height
+    scale = max_dimension / float(longest)
+    target_width = max(2, int(round(width * scale)))
+    target_height = max(2, int(round(height * scale)))
+    return target_width, target_height
+
+
 def write_frame_image(frame: Any, destination: Path, jpeg_quality: int) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
@@ -1126,6 +1248,62 @@ def frame_filename(timestamp_seconds: float) -> str:
     return f"{timestamp_seconds:09.3f}.jpg".replace(".", "_", 1)
 
 
+def write_srt_file(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8-sig")
+
+
+def sample_frame_numbers(video_meta: VideoMeta, frame_interval_seconds: float, max_frames: int) -> tuple[int, list[int]]:
+    frame_step = max(1, int(round(video_meta.fps * frame_interval_seconds)))
+    sample_indices = list(range(0, max(video_meta.frame_count, 1), frame_step))
+    if max_frames > 0:
+        sample_indices = sample_indices[:max_frames]
+    return frame_step, sample_indices
+
+
+def extract_sample_frames_with_ffmpeg(
+    *,
+    ffmpeg_path: str,
+    video_path: Path,
+    output_dir: Path,
+    frame_step: int,
+    output_count: int,
+    video_meta: VideoMeta,
+    resize_for_llm: int,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if output_count <= 0:
+        return []
+
+    filter_parts = [f"select='not(mod(n\\,{frame_step}))'"]
+    target_width, target_height = resolve_resize_dimensions(video_meta.width, video_meta.height, resize_for_llm)
+    if (target_width, target_height) != (video_meta.width, video_meta.height):
+        filter_parts.append(f"scale={target_width}:{target_height}:flags=lanczos")
+
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(video_path),
+        "-vf",
+        ",".join(filter_parts),
+        "-vsync",
+        "vfr",
+        "-q:v",
+        "2",
+        "-frames:v",
+        str(output_count),
+        str(output_dir / "%06d.jpg"),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip() or "unknown ffmpeg error"
+        raise RuntimeError(f"ffmpeg sample extraction failed: {stderr}")
+    return sorted(output_dir.glob("*.jpg"))
+
+
 def extract_candidates_for_video(
     video_path: Path,
     *,
@@ -1135,21 +1313,14 @@ def extract_candidates_for_video(
     max_frames: int,
     jpeg_quality: int,
     resize_for_llm: int,
+    ffmpeg_override: str | None = None,
 ) -> Path:
     video_meta = probe_video(video_path)
     video_output_dir = output_root / video_path.stem
     extract_dir = video_output_dir / "extract"
     frames_dir = extract_dir / "frames"
     extract_dir.mkdir(parents=True, exist_ok=True)
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open video: {video_path}")
-
-    frame_step = max(1, int(round(video_meta.fps * frame_interval_seconds)))
-    sample_indices = list(range(0, max(video_meta.frame_count, 1), frame_step))
-    if max_frames > 0:
-        sample_indices = sample_indices[:max_frames]
+    frame_step, sample_indices = sample_frame_numbers(video_meta, frame_interval_seconds, max_frames)
 
     gate_config = {
         "filters": config["filters"],
@@ -1162,13 +1333,35 @@ def extract_candidates_for_video(
     previous_frame: Any | None = None
     previous_hash: Any | None = None
     last_forced_timestamp: float | None = None
+    extract_backend = "ffmpeg"
 
-    progress = tqdm(sample_indices, desc=f"extract:{video_path.name}", unit="frame")
     try:
-        for frame_number in progress:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-            ok, frame = cap.read()
-            if not ok:
+        ffmpeg_path = find_ffmpeg(ffmpeg_override)
+        logging.info("Extracting sampled frames via ffmpeg for %s", video_path.name)
+        temp_dir = extract_dir / "_ffmpeg_samples"
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_files = extract_sample_frames_with_ffmpeg(
+            ffmpeg_path=ffmpeg_path,
+            video_path=video_path,
+            output_dir=temp_dir,
+            frame_step=frame_step,
+            output_count=len(sample_indices),
+            video_meta=video_meta,
+            resize_for_llm=resize_for_llm,
+        )
+        if len(temp_files) != len(sample_indices):
+            logging.warning(
+                "ffmpeg extracted %s sampled frames for %s, expected %s.",
+                len(temp_files),
+                video_path.name,
+                len(sample_indices),
+            )
+        paired_samples = list(zip(sample_indices, temp_files))
+        progress = tqdm(paired_samples, desc=f"extract:{video_path.name}", unit="frame")
+        for frame_number, temp_image_path in progress:
+            frame = cv2.imread(str(temp_image_path))
+            if frame is None:
+                logging.warning("Skipping unreadable sampled frame %s", temp_image_path)
                 continue
 
             timestamp_seconds = frame_number / video_meta.fps if video_meta.fps > 0 else 0.0
@@ -1190,18 +1383,70 @@ def extract_candidates_for_video(
 
             if candidate:
                 last_forced_timestamp = timestamp_seconds
-                prepared_frame = resize_frame(frame, resize_for_llm)
                 image_path = frames_dir / frame_filename(timestamp_seconds)
-                write_frame_image(prepared_frame, image_path, jpeg_quality)
+                write_frame_image(frame, image_path, jpeg_quality)
                 record["image_path"] = str(image_path.resolve())
-                record["image_width"] = int(prepared_frame.shape[1])
-                record["image_height"] = int(prepared_frame.shape[0])
+                record["image_width"] = int(frame.shape[1])
+                record["image_height"] = int(frame.shape[0])
 
             records.append(record)
             previous_frame = frame
             previous_hash = current_hash
-    finally:
-        cap.release()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        extract_backend = "opencv_seek_fallback"
+        shutil.rmtree(extract_dir / "_ffmpeg_samples", ignore_errors=True)
+        logging.warning(
+            "ffmpeg-backed extract failed for %s (%s); falling back to OpenCV seek extraction.",
+            video_path.name,
+            exc,
+        )
+        records = []
+        previous_frame = None
+        previous_hash = None
+        last_forced_timestamp = None
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open video: {video_path}")
+        try:
+            progress = tqdm(sample_indices, desc=f"extract:{video_path.name}", unit="frame")
+            for frame_number in progress:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+
+                timestamp_seconds = frame_number / video_meta.fps if video_meta.fps > 0 else 0.0
+                metrics, current_hash = compute_metrics(frame, previous_frame, previous_hash)
+                candidate = should_send_to_model(metrics, timestamp_seconds, last_forced_timestamp, gate_config)
+
+                record = {
+                    "timestamp_seconds": round(timestamp_seconds, 3),
+                    "timestamp_srt": format_timestamp(timestamp_seconds),
+                    "frame_number": frame_number,
+                    "candidate": candidate,
+                    "blur_score": round(metrics.blur_score, 3),
+                    "frame_diff": round(metrics.frame_diff, 3),
+                    "hash_distance": int(metrics.hash_distance),
+                    "image_path": "",
+                    "image_width": 0,
+                    "image_height": 0,
+                }
+
+                if candidate:
+                    last_forced_timestamp = timestamp_seconds
+                    prepared_frame = resize_frame(frame, resize_for_llm)
+                    image_path = frames_dir / frame_filename(timestamp_seconds)
+                    write_frame_image(prepared_frame, image_path, jpeg_quality)
+                    record["image_path"] = str(image_path.resolve())
+                    record["image_width"] = int(prepared_frame.shape[1])
+                    record["image_height"] = int(prepared_frame.shape[0])
+
+                records.append(record)
+                previous_frame = frame
+                previous_hash = current_hash
+        finally:
+            cap.release()
 
     payload = {
         "stage": "extract",
@@ -1209,6 +1454,7 @@ def extract_candidates_for_video(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "config_snapshot": {
             "extract": {
+                "backend": extract_backend,
                 "frame_interval_seconds": round(frame_interval_seconds, 3),
                 "sample_fps": round(1.0 / frame_interval_seconds, 3),
                 "forced_keep_interval_seconds": float(config["extract"]["forced_keep_interval_seconds"]),
@@ -1610,6 +1856,7 @@ def ensure_extract_index(args: argparse.Namespace, config: dict[str, Any]) -> Pa
         max_frames=int(extract_settings["max_frames"]),
         jpeg_quality=int(extract_settings["jpeg_quality"]),
         resize_for_llm=int(extract_settings["resize_for_llm"]),
+        ffmpeg_override=getattr(args, "ffmpeg", None),
     )
 
 
@@ -1857,6 +2104,163 @@ def build_coarse_candidate_segments(
     return sorted(candidates, key=lambda item: float(item["coarse_score"]), reverse=True)
 
 
+def overlap_ratio(
+    first_start: float,
+    first_end: float,
+    second_start: float,
+    second_end: float,
+) -> float:
+    overlap = max(0.0, min(first_end, second_end) - max(first_start, second_start))
+    shorter = max(0.001, min(first_end - first_start, second_end - second_start))
+    return overlap / shorter
+
+
+def select_diverse_highlight_proposals(
+    proposals: list[dict[str, Any]],
+    limit: int,
+    *,
+    max_overlap: float = 0.6,
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    for proposal in proposals:
+        if all(
+            overlap_ratio(
+                float(proposal["source_start"]),
+                float(proposal["source_end"]),
+                float(existing["source_start"]),
+                float(existing["source_end"]),
+            )
+            < max_overlap
+            for existing in selected
+        ):
+            selected.append(proposal)
+        else:
+            remaining.append(proposal)
+        if len(selected) >= limit:
+            return selected
+    for proposal in remaining:
+        if len(selected) >= limit:
+            break
+        selected.append(proposal)
+    return selected
+
+
+def build_single_continuous_highlight_proposals(
+    payload: dict[str, Any],
+    *,
+    target_seconds: float,
+    candidate_pool_size: int,
+    top_highlights: int,
+) -> list[dict[str, Any]]:
+    records = list(payload.get("frames", []))
+    raw_segments = list(payload.get("segments", []))
+    normalized = [normalize_review_segment(segment, index) for index, segment in enumerate(raw_segments)]
+    proposals: list[dict[str, Any]] = []
+    if records and raw_segments:
+        coarse_candidates = build_coarse_candidate_segments(records=records, segments=raw_segments)
+        limit = max(1, int(candidate_pool_size))
+        for candidate in coarse_candidates[:limit]:
+            center = (float(candidate["start"]) + float(candidate["end"])) / 2.0
+            source_start = max(0.0, center - (target_seconds / 2.0))
+            source_end = min(float(payload["video"]["duration_seconds"]), source_start + target_seconds)
+            source_start = max(0.0, source_end - target_seconds)
+            window_records = [
+                record
+                for record in records
+                if source_start <= float(record.get("timestamp_seconds", 0.0)) <= source_end
+            ]
+            keep_scores = [float(record.get("score", 0.0)) for record in window_records if bool(record.get("keep", False))]
+            motion_values = [float(record.get("frame_diff", 0.0)) for record in window_records]
+            normalized_score = max(
+                0.0,
+                min(1.0, (min(10.0, (_safe_mean(keep_scores) * 6.0) + (min(10.0, _safe_mean(motion_values) / 3.0) * 0.4))) / 10.0),
+            )
+            matched = [
+                segment
+                for segment in normalized
+                if float(segment["end_seconds"]) > source_start and float(segment["start_seconds"]) < source_end
+            ]
+            label_counts: dict[str, int] = {}
+            reasons: list[str] = []
+            for segment in matched:
+                for label in segment.get("labels", []):
+                    label_key = str(label).strip()
+                    if label_key:
+                        label_counts[label_key] = label_counts.get(label_key, 0) + 1
+                reason = str(segment.get("reason", "")).strip()
+                if reason:
+                    reasons.append(reason)
+            labels = [item[0] for item in sorted(label_counts.items(), key=lambda item: (-item[1], item[0]))[:3]]
+            reason_text = reasons[0] if reasons else "single continuous highlight"
+            proposals.append(
+                {
+                    "source_start": round(source_start, 3),
+                    "source_end": round(source_end, 3),
+                    "duration": round(max(0.0, source_end - source_start), 3),
+                    "score": round(normalized_score, 3),
+                    "labels": labels or list(candidate.get("labels", [])),
+                    "reason": reason_text,
+                    "anchor_seconds": round(center, 3),
+                    "segment_id": str(candidate["segment_id"]),
+                }
+            )
+    else:
+        ranked_segments = sorted(
+            zip(normalized, raw_segments, strict=False),
+            key=lambda item: float(item[0].get("score", 0.0)),
+            reverse=True,
+        )
+        for segment, raw_segment in ranked_segments[: max(1, int(candidate_pool_size))]:
+            if "source_start_seconds" in raw_segment and "source_end_seconds" in raw_segment:
+                source_start_hint = float(raw_segment["source_start_seconds"])
+                source_end_hint = float(raw_segment["source_end_seconds"])
+            else:
+                source_start_hint = float(segment["start_seconds"])
+                source_end_hint = float(segment["end_seconds"])
+            center = (source_start_hint + source_end_hint) / 2.0
+            video_duration = float(payload["video"].get("duration_seconds", source_end_hint + target_seconds))
+            source_start = max(0.0, center - (target_seconds / 2.0))
+            source_end = min(video_duration, source_start + target_seconds)
+            source_start = max(0.0, source_end - target_seconds)
+            proposals.append(
+                {
+                    "source_start": round(source_start, 3),
+                    "source_end": round(source_end, 3),
+                    "duration": round(max(0.0, source_end - source_start), 3),
+                    "score": round(float(segment.get("score", 0.0)), 3),
+                    "labels": list(segment.get("labels", [])),
+                    "reason": str(segment.get("reason", "")).strip() or "single continuous highlight",
+                    "anchor_seconds": round(center, 3),
+                    "segment_id": f"seg_{int(segment.get('segment_index', 0)):04d}",
+                }
+            )
+    ranked = sorted(proposals, key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    return select_diverse_highlight_proposals(ranked, max(1, int(top_highlights)))
+
+
+def proposal_to_review_segments(proposal: dict[str, Any]) -> list[dict[str, Any]]:
+    duration = round(max(0.0, float(proposal["source_end"]) - float(proposal["source_start"])), 3)
+    return [
+        {
+            "rank": 1,
+            "start_seconds": 0.0,
+            "end_seconds": duration,
+            "duration_seconds": duration,
+            "source_start_seconds": round(float(proposal["source_start"]), 3),
+            "source_end_seconds": round(float(proposal["source_end"]), 3),
+            "timeline_start_seconds": 0.0,
+            "timeline_end_seconds": duration,
+            "score": round(float(proposal.get("score", 0.0)), 3),
+            "labels": list(proposal.get("labels", [])),
+            "reason": str(proposal.get("reason", "")).strip() or "single continuous highlight",
+            "hit_count": 1,
+            "anchor_seconds": round(float(proposal.get("anchor_seconds", duration / 2.0)), 3),
+            "source_segment_index": 0,
+        }
+    ]
+
+
 def build_contact_sheet(
     *,
     window_records: list[dict[str, Any]],
@@ -1965,31 +2369,56 @@ def refine_final_highlight(
     video_duration_seconds: float,
     final_duration_seconds: float,
 ) -> dict[str, Any]:
-    if not windows:
-        return {
-            "highlight_id": "hl_0001",
-            "source_start": 0.0,
-            "source_end": min(round(float(video_duration_seconds), 3), round(float(final_duration_seconds), 3)),
-            "duration": round(min(float(video_duration_seconds), float(final_duration_seconds)), 3),
-            "score": 0.0,
-            "reason": "fallback: no recommended temporal window available",
-            "subtitle_mode": "human",
-        }
-    best = windows[0]
-    peak_center = _safe_mean([float(value) for value in best.get("peak_time", [])])
+    return refine_final_highlights(
+        windows=windows,
+        video_duration_seconds=video_duration_seconds,
+        final_duration_seconds=final_duration_seconds,
+        top_highlights=1,
+    )[0]
+
+
+def refine_final_highlights(
+    *,
+    windows: list[dict[str, Any]],
+    video_duration_seconds: float,
+    final_duration_seconds: float,
+    top_highlights: int,
+) -> list[dict[str, Any]]:
     desired_duration = max(5.0, float(final_duration_seconds))
-    start = max(0.0, peak_center - (desired_duration / 2.0))
-    end = min(float(video_duration_seconds), start + desired_duration)
-    start = max(0.0, end - desired_duration)
-    return {
-        "highlight_id": "hl_0001",
-        "source_start": round(start, 3),
-        "source_end": round(end, 3),
-        "duration": round(end - start, 3),
-        "score": round(float(best.get("score", 0.0)), 3),
-        "reason": "top temporal window with strongest combined action and continuity signals",
-        "subtitle_mode": "human",
-    }
+    if not windows:
+        return [
+            {
+                "highlight_id": "hl_0001",
+                "source_start": 0.0,
+                "source_end": min(round(float(video_duration_seconds), 3), round(float(final_duration_seconds), 3)),
+                "duration": round(min(float(video_duration_seconds), float(final_duration_seconds)), 3),
+                "score": 0.0,
+                "reason": "fallback: no recommended temporal window available",
+                "subtitle_mode": "human",
+            }
+        ]
+    proposals: list[dict[str, Any]] = []
+    for index, window in enumerate(windows, start=1):
+        peak_center = _safe_mean([float(value) for value in window.get("peak_time", [])])
+        start = max(0.0, peak_center - (desired_duration / 2.0))
+        end = min(float(video_duration_seconds), start + desired_duration)
+        start = max(0.0, end - desired_duration)
+        proposals.append(
+            {
+                "highlight_id": f"hl_{index:04d}",
+                "source_start": round(start, 3),
+                "source_end": round(end, 3),
+                "duration": round(end - start, 3),
+                "score": round(float(window.get("score", 0.0)), 3),
+                "reason": "top temporal window with strongest combined action and continuity signals",
+                "subtitle_mode": "human",
+                "window_start": round(float(window.get("window_start", start)), 3),
+                "window_end": round(float(window.get("window_end", end)), 3),
+                "segment_id": str(window.get("segment_id", "")),
+            }
+        )
+    ranked = sorted(proposals, key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    return select_diverse_highlight_proposals(ranked, max(1, int(top_highlights)))
 
 
 def command_temporal(args: argparse.Namespace) -> int:
@@ -2012,21 +2441,26 @@ def command_temporal(args: argparse.Namespace) -> int:
         window_stride=float(args.window_stride),
         contact_sheet_frames=int(args.contact_sheet_frames),
     )
-    final_highlight = refine_final_highlight(
+    final_highlights = refine_final_highlights(
         windows=windows,
         video_duration_seconds=float(payload["video"]["duration_seconds"]),
         final_duration_seconds=float(args.final_duration_seconds),
+        top_highlights=int(getattr(args, "top_highlights", 1) or 1),
     )
+    final_highlight = final_highlights[0]
 
     candidate_path = output_dir / "candidate_segments.json"
     windows_path = output_dir / "temporal_windows.json"
     final_path = output_dir / "highlight.final.json"
+    top_path = output_dir / "highlight.top.json"
     candidate_path.write_text(json.dumps({"segments": candidates}, ensure_ascii=False, indent=2), encoding="utf-8")
     windows_path.write_text(json.dumps({"windows": windows}, ensure_ascii=False, indent=2), encoding="utf-8")
     final_path.write_text(json.dumps(final_highlight, ensure_ascii=False, indent=2), encoding="utf-8")
+    top_path.write_text(json.dumps({"highlights": final_highlights}, ensure_ascii=False, indent=2), encoding="utf-8")
     logging.info("Wrote %s", candidate_path)
     logging.info("Wrote %s", windows_path)
     logging.info("Wrote %s", final_path)
+    logging.info("Wrote %s", top_path)
     return 0
 
 
@@ -2291,6 +2725,8 @@ def resolve_review_settings(config: dict[str, Any], args: argparse.Namespace) ->
         review["selection_mode"] = str(args.selection_mode)
     if getattr(args, "single_top_k", None) is not None:
         review["single_top_k"] = max(1, int(args.single_top_k))
+    if getattr(args, "top_highlights", None) is not None:
+        review["top_highlights"] = max(1, int(args.top_highlights))
     if getattr(args, "clip_before", None) is not None:
         review["clip_before"] = float(args.clip_before)
     if getattr(args, "clip_after", None) is not None:
@@ -2305,6 +2741,14 @@ def resolve_review_settings(config: dict[str, Any], args: argparse.Namespace) ->
         review["max_clips_per_source_segment"] = int(args.max_clips_per_source_segment)
     if getattr(args, "caption_mode", None):
         review["caption_mode"] = args.caption_mode
+    if getattr(args, "caption_style", None):
+        review["caption_style"] = str(args.caption_style).strip().lower()
+    if getattr(args, "caption_prefix", None) is not None:
+        review["caption_prefix"] = str(args.caption_prefix or "")
+    if getattr(args, "caption_suffix", None) is not None:
+        review["caption_suffix"] = str(args.caption_suffix or "")
+    if getattr(args, "caption_detail_prefix", None) is not None:
+        review["caption_detail_prefix"] = str(args.caption_detail_prefix or "")
     return review
 
 
@@ -2318,6 +2762,10 @@ def humanize_labels(labels: list[str]) -> list[str]:
     return [HUMAN_LABELS.get(label, label.replace("_", " ")) for label in labels]
 
 
+def humanize_douyin_labels(labels: list[str]) -> list[str]:
+    return [DOUYIN_LABELS.get(label, label.replace("_", " ")) for label in labels]
+
+
 def sentence_case(text: str) -> str:
     cleaned = text.strip()
     if not cleaned:
@@ -2325,13 +2773,126 @@ def sentence_case(text: str) -> str:
     return cleaned[0].upper() + cleaned[1:]
 
 
-def auto_caption_for_segment(segment: dict[str, Any], caption_mode: str) -> tuple[str, str]:
+def build_douyin_caption(segment: dict[str, Any]) -> tuple[str, str]:
+    reason = str(segment.get("reason", "")).strip()
+    labels = [str(label).strip() for label in segment.get("labels", []) if str(label).strip()]
+    douyin_labels = humanize_douyin_labels(labels)
+    label_text = " / ".join(douyin_labels[:2])
+    if labels:
+        primary = labels[0]
+        if primary in {"bend", "corner_entry", "apex", "corner_exit"}:
+            caption = "这段压弯节奏太顺了"
+        elif primary in {"overtake", "traffic"}:
+            caption = "贴车穿过去的这下很顶"
+        elif primary in {"high_speed", "full_throttle", "late_braking"}:
+            caption = "速度感一下子就起来了"
+        elif primary in {"tunnel_transition"}:
+            caption = "出隧道这一瞬间直接炸裂"
+        elif primary in {"scenery", "water_view", "mountain_view", "sunset"}:
+            caption = "风景和骑行节奏一起拉满"
+        else:
+            caption = f"{label_text}这一段很适合做开场" if label_text else "这一段很适合短视频开场"
+    else:
+        caption = "这一段很适合短视频开场"
+    detail = reason or label_text
+    return caption, detail
+
+
+def decorate_caption_text(text: str, prefix: str, suffix: str) -> str:
+    updated = text.strip()
+    if not updated:
+        return ""
+    normalized_prefix = prefix.strip()
+    normalized_suffix = suffix.strip()
+    if normalized_prefix and not updated.startswith(normalized_prefix):
+        updated = f"{normalized_prefix}{updated}"
+    if normalized_suffix and not updated.endswith(normalized_suffix):
+        updated = f"{updated}{normalized_suffix}"
+    return updated
+
+
+def decorate_caption_detail(text: str, prefix: str) -> str:
+    updated = text.strip()
+    normalized_prefix = prefix.strip()
+    if not updated:
+        return ""
+    if normalized_prefix and not updated.startswith(normalized_prefix):
+        return f"{normalized_prefix}{updated}"
+    return updated
+
+
+def contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def trim_caption_text(text: str, limit: int) -> str:
+    cleaned = " ".join(text.strip().split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 1)].rstrip() + "…"
+
+
+def build_douyin_caption_v2(segment: dict[str, Any]) -> tuple[str, str]:
+    reason = str(segment.get("reason", "")).strip()
+    labels = [str(label).strip() for label in segment.get("labels", []) if str(label).strip()]
+    douyin_labels = humanize_douyin_labels(labels)
+    label_text = "、".join(douyin_labels[:2])
+    primary = labels[0] if labels else ""
+
+    if primary in {"bend", "corner_entry", "apex", "corner_exit", "late_braking"}:
+        caption = "这段压弯节奏太顺了"
+    elif primary in {"overtake", "traffic", "close_pass"}:
+        caption = "这一下贴车穿过去真的顶"
+    elif primary in {"high_speed", "full_throttle", "speed_sensation"}:
+        caption = "速度感一下子就拉满了"
+    elif primary in {"tunnel_transition"}:
+        caption = "出隧道这一瞬间太适合做开场"
+    elif primary in {"scenery", "water_view", "mountain_view", "sunset"}:
+        caption = "风景和节奏一起拉满了"
+    elif primary in {"group_ride"}:
+        caption = "前车带路这段镜头感很强"
+    elif primary in {"handlebar_wobble", "near_barrier"}:
+        caption = "这一下张力直接上来了"
+    else:
+        caption = "这一段很适合拿来做开场"
+
+    if contains_cjk(reason):
+        detail = reason
+    elif label_text:
+        detail = f"看点集中在{label_text}"
+    elif reason:
+        detail = "这一段画面节奏和速度感都在线"
+    else:
+        detail = "这一段适合做30秒短片钩子"
+
+    return trim_caption_text(caption, 18), trim_caption_text(detail, 24)
+
+
+def force_caption_style(
+    segment: dict[str, Any],
+    review_settings: dict[str, Any],
+    existing_caption: str,
+    existing_detail: str,
+) -> tuple[str, str]:
+    caption_style = str(review_settings.get("caption_style", "default")).strip().lower()
+    if caption_style == "douyin":
+        return build_douyin_caption_v2(segment)
+    if existing_caption:
+        return existing_caption, existing_detail
+    return auto_caption_for_segment(segment, review_settings)
+
+
+def auto_caption_for_segment(segment: dict[str, Any], review_settings: dict[str, Any]) -> tuple[str, str]:
+    caption_mode = str(review_settings.get("caption_mode", "human")).strip().lower()
+    caption_style = str(review_settings.get("caption_style", "default")).strip().lower()
     reason = sentence_case(str(segment.get("reason", "")).strip())
     human_labels = humanize_labels([str(label) for label in segment.get("labels", []) if str(label).strip()])
     label_text = ", ".join(human_labels)
 
     if caption_mode == "score":
         return "", ""
+    if caption_style == "douyin" and caption_mode != "score":
+        return build_douyin_caption_v2(segment)
     if caption_mode == "reason":
         if reason:
             return reason, ""
@@ -2347,123 +2908,47 @@ def auto_caption_for_segment(segment: dict[str, Any], caption_mode: str) -> tupl
     return "Highlight segment", ""
 
 
-def apply_caption_mode(segments: list[dict[str, Any]], caption_mode: str) -> list[dict[str, Any]]:
+def apply_caption_mode(segments: list[dict[str, Any]], review_settings: dict[str, Any]) -> list[dict[str, Any]]:
+    prefix = str(review_settings.get("caption_prefix", ""))
+    suffix = str(review_settings.get("caption_suffix", ""))
+    detail_prefix = str(review_settings.get("caption_detail_prefix", ""))
     updated: list[dict[str, Any]] = []
     for segment in segments:
         copied = dict(segment)
         existing_caption = str(copied.get("caption", "")).strip()
         existing_detail = str(copied.get("caption_detail", "")).strip()
-        if not existing_caption:
-            caption, detail = auto_caption_for_segment(copied, caption_mode)
-            if caption:
-                copied["caption"] = caption
-            if detail:
-                copied["caption_detail"] = detail
-        elif existing_detail:
-            copied["caption_detail"] = existing_detail
+        caption, detail = force_caption_style(copied, review_settings, existing_caption, existing_detail)
+        if caption:
+            copied["caption"] = decorate_caption_text(caption, prefix, suffix)
+        if detail:
+            copied["caption_detail"] = decorate_caption_detail(detail, detail_prefix)
         updated.append(copied)
     return updated
 
 
-def build_review_segments(payload: dict[str, Any], review_settings: dict[str, Any]) -> list[dict[str, Any]]:
+def build_review_variants(payload: dict[str, Any], review_settings: dict[str, Any]) -> list[dict[str, Any]]:
     selection_mode = str(review_settings.get("selection_mode", "montage")).strip().lower()
     if selection_mode == "single_continuous":
-        records = list(payload.get("frames", []))
-        raw_segments = list(payload["segments"])
-        normalized = [normalize_review_segment(segment, index) for index, segment in enumerate(raw_segments)]
-        if records:
-            coarse_candidates = build_coarse_candidate_segments(records=records, segments=raw_segments)
-            top_k = max(1, int(review_settings.get("single_top_k", 5)))
-            target_seconds = max(5.0, float(review_settings["target_seconds"]))
-            temporal_windows: list[dict[str, Any]] = []
-            for candidate in coarse_candidates[:top_k]:
-                center = (float(candidate["start"]) + float(candidate["end"])) / 2.0
-                source_start = max(0.0, center - (target_seconds / 2.0))
-                source_end = min(float(payload["video"]["duration_seconds"]), source_start + target_seconds)
-                source_start = max(0.0, source_end - target_seconds)
-                window_records = [
-                    record
-                    for record in records
-                    if source_start <= float(record.get("timestamp_seconds", 0.0)) <= source_end
-                ]
-                keep_scores = [float(record.get("score", 0.0)) for record in window_records if bool(record.get("keep", False))]
-                motion_values = [float(record.get("frame_diff", 0.0)) for record in window_records]
-                window_score = min(10.0, (_safe_mean(keep_scores) * 6.0) + (min(10.0, _safe_mean(motion_values) / 3.0) * 0.4))
-                temporal_windows.append(
-                    {
-                        "segment_id": candidate["segment_id"],
-                        "window_start": round(source_start, 3),
-                        "window_end": round(source_end, 3),
-                        "peak_time": [round(center, 3), round(center, 3)],
-                        "score": round(window_score, 3),
-                        "recommended": True,
-                    }
-                )
-            refined = refine_final_highlight(
-                windows=temporal_windows,
-                video_duration_seconds=float(payload["video"]["duration_seconds"]),
-                final_duration_seconds=target_seconds,
+        target_seconds = max(5.0, float(review_settings["target_seconds"]))
+        top_highlights = max(1, int(review_settings.get("top_highlights", 1)))
+        candidate_pool_size = max(int(review_settings.get("single_top_k", 5)), top_highlights * 3)
+        proposals = build_single_continuous_highlight_proposals(
+            payload,
+            target_seconds=target_seconds,
+            candidate_pool_size=candidate_pool_size,
+            top_highlights=top_highlights,
+        )
+        variants: list[dict[str, Any]] = []
+        for index, proposal in enumerate(proposals, start=1):
+            segments = proposal_to_review_segments(proposal)
+            variants.append(
+                {
+                    "index": index,
+                    "segments": apply_caption_mode(segments, review_settings),
+                    "proposal": proposal,
+                }
             )
-            source_start = float(refined["source_start"])
-            source_end = float(refined["source_end"])
-            matched = [
-                segment
-                for segment in normalized
-                if float(segment["end_seconds"]) > source_start and float(segment["start_seconds"]) < source_end
-            ]
-            label_counts: dict[str, int] = {}
-            reasons: list[str] = []
-            for segment in matched:
-                for label in segment.get("labels", []):
-                    label_counts[str(label)] = label_counts.get(str(label), 0) + 1
-                reason = str(segment.get("reason", "")).strip()
-                if reason:
-                    reasons.append(reason)
-            labels = [item[0] for item in sorted(label_counts.items(), key=lambda item: (-item[1], item[0]))[:3]]
-            reason_text = str(refined.get("reason", "")).strip() or (reasons[0] if reasons else "single continuous highlight")
-            score = max(0.0, min(1.0, float(refined.get("score", 0.0)) / 10.0))
-        else:
-            if not normalized:
-                return []
-            best = max(normalized, key=lambda segment: float(segment.get("score", 0.0)))
-            target_seconds = max(5.0, float(review_settings["target_seconds"]))
-            source_start_hint = float(best["start_seconds"])
-            source_end_hint = float(best["end_seconds"])
-            best_index = int(best.get("segment_index", -1))
-            if 0 <= best_index < len(raw_segments):
-                raw_best = raw_segments[best_index]
-                if "source_start_seconds" in raw_best and "source_end_seconds" in raw_best:
-                    source_start_hint = float(raw_best["source_start_seconds"])
-                    source_end_hint = float(raw_best["source_end_seconds"])
-            center = (source_start_hint + source_end_hint) / 2.0
-            video_duration = float(payload["video"].get("duration_seconds", source_end_hint + target_seconds))
-            source_start = max(0.0, center - (target_seconds / 2.0))
-            source_end = min(video_duration, source_start + target_seconds)
-            source_start = max(0.0, source_end - target_seconds)
-            labels = list(best.get("labels", []))
-            reason_text = str(best.get("reason", "")).strip() or "single continuous highlight"
-            score = float(best.get("score", 0.0))
-
-        duration = round(max(0.0, source_end - source_start), 3)
-        segments = [
-            {
-                "rank": 1,
-                "start_seconds": 0.0,
-                "end_seconds": duration,
-                "duration_seconds": duration,
-                "source_start_seconds": round(source_start, 3),
-                "source_end_seconds": round(source_end, 3),
-                "timeline_start_seconds": 0.0,
-                "timeline_end_seconds": duration,
-                "score": round(score, 3),
-                "labels": labels,
-                "reason": reason_text,
-                "hit_count": 1,
-                "anchor_seconds": round(source_start + (duration / 2.0), 3),
-                "source_segment_index": 0,
-            }
-        ]
-        return apply_caption_mode(segments, str(review_settings["caption_mode"]))
+        return variants
 
     raw_segments = list(payload["segments"])
     if raw_segments and "source_start_seconds" in raw_segments[0] and "source_end_seconds" in raw_segments[0]:
@@ -2485,7 +2970,14 @@ def build_review_segments(payload: dict[str, Any], review_settings: dict[str, An
             max_clips_per_source_segment=int(review_settings["max_clips_per_source_segment"]),
         )
         segments = build_export_segments(selected)
-    return apply_caption_mode(segments, str(review_settings["caption_mode"]))
+    return [{"index": 1, "segments": apply_caption_mode(segments, review_settings)}]
+
+
+def build_review_segments(payload: dict[str, Any], review_settings: dict[str, Any]) -> list[dict[str, Any]]:
+    variants = build_review_variants(payload, review_settings)
+    if not variants:
+        return []
+    return list(variants[0]["segments"])
 
 
 def parse_resolution(resolution: str | None, source_height: int) -> int | None:
@@ -2496,6 +2988,13 @@ def parse_resolution(resolution: str | None, source_height: int) -> int | None:
     if target_height is None or target_height <= 0:
         return None
     return min(int(source_height), int(target_height)) if source_height > 0 else int(target_height)
+
+
+def variant_stem(base_stem: str, index: int, total: int) -> str:
+    if total <= 1:
+        return base_stem
+    width = max(2, len(str(total)))
+    return f"{base_stem}_{index:0{width}d}"
 
 
 def write_review_outputs(
@@ -2519,7 +3018,9 @@ def write_review_outputs(
         "actual_seconds": actual_seconds,
         "selection_mode": str(review_settings.get("selection_mode", "montage")),
         "single_top_k": int(review_settings.get("single_top_k", 5)),
+        "top_highlights": int(review_settings.get("top_highlights", 1)),
         "caption_mode": str(review_settings["caption_mode"]),
+        "caption_style": str(review_settings.get("caption_style", "default")),
         "segments": segments,
     }
     editable_payload = {
@@ -2538,11 +3039,8 @@ def write_review_outputs(
 
     review_json_path.write_text(json.dumps(review_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     editable_json_path.write_text(json.dumps(editable_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    final_srt_path.write_text(build_srt_text(segments), encoding="utf-8")
-    source_srt_path.write_text(
-        build_srt_text(segments, start_key="source_start_seconds", end_key="source_end_seconds"),
-        encoding="utf-8",
-    )
+    write_srt_file(final_srt_path, build_srt_text(segments))
+    write_srt_file(source_srt_path, build_srt_text(segments, start_key="source_start_seconds", end_key="source_end_seconds"))
 
     return {
         "review_json": review_json_path,
@@ -2550,6 +3048,43 @@ def write_review_outputs(
         "final_srt": final_srt_path,
         "source_srt": source_srt_path,
     }
+
+
+def build_preview_subtitle_segments(
+    segments: list[dict[str, Any]],
+    *,
+    default_duration_seconds: float = 5.0,
+) -> list[dict[str, Any]]:
+    preview_segments: list[dict[str, Any]] = []
+    default_duration = max(0.5, float(default_duration_seconds))
+    for segment in segments:
+        start_seconds = float(segment.get("start_seconds", 0.0) or 0.0)
+        end_seconds = float(segment.get("end_seconds", start_seconds) or start_seconds)
+        if end_seconds <= start_seconds:
+            continue
+
+        cue_start = start_seconds
+        cue_end = min(end_seconds, start_seconds + default_duration)
+
+        anchor = segment.get("anchor_seconds")
+        source_start = segment.get("source_start_seconds")
+        source_end = segment.get("source_end_seconds")
+        if anchor is not None and source_start is not None and source_end is not None:
+            source_start_seconds = float(source_start)
+            source_end_seconds = float(source_end)
+            if source_end_seconds > source_start_seconds:
+                anchor_offset = float(anchor) - source_start_seconds
+                anchor_offset = max(0.0, min(anchor_offset, source_end_seconds - source_start_seconds))
+                cue_start = min(end_seconds, max(start_seconds, start_seconds + anchor_offset))
+                cue_end = min(end_seconds, cue_start + default_duration)
+        if cue_end <= cue_start:
+            continue
+
+        preview_segment = dict(segment)
+        preview_segment["start_seconds"] = round(cue_start, 3)
+        preview_segment["end_seconds"] = round(cue_end, 3)
+        preview_segments.append(preview_segment)
+    return preview_segments
 
 
 def render_preview_if_requested(
@@ -2561,9 +3096,9 @@ def render_preview_if_requested(
     output_dir: Path,
     stem: str,
     segments: list[dict[str, Any]],
-) -> Path | None:
+) -> tuple[Path | None, Path | None]:
     if not requested:
-        return None
+        return None, None
     source_path_text = str(payload["video"].get("source_path", "")).strip()
     if not source_path_text:
         raise ValueError("Preview rendering requires a source video path.")
@@ -2572,6 +3107,9 @@ def render_preview_if_requested(
     preview_height = parse_resolution(str(preview_settings["resolution"]), video_meta.height)
     ffmpeg_path = find_ffmpeg(ffmpeg_override)
     preview_path = output_dir / f"{stem}.preview.mp4"
+    preview_srt_path = output_dir / f"{stem}.preview.srt"
+    preview_subtitle_segments = build_preview_subtitle_segments(segments)
+    write_srt_file(preview_srt_path, build_srt_text(preview_subtitle_segments))
     render_video(
         ffmpeg_path=ffmpeg_path,
         source_video=source_path,
@@ -2581,7 +3119,7 @@ def render_preview_if_requested(
         crf=int(preview_settings["crf"]),
         scale_height=preview_height,
     )
-    return preview_path
+    return preview_path, preview_srt_path
 
 
 def infer_render_stem(input_path: Path, target_seconds: float | None) -> str:
@@ -2632,11 +3170,8 @@ def write_render_outputs(
     source_srt_path = output_dir / f"{stem}.source.srt"
 
     json_path.write_text(json.dumps(output_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    final_srt_path.write_text(build_srt_text(segments), encoding="utf-8")
-    source_srt_path.write_text(
-        build_srt_text(segments, start_key="source_start_seconds", end_key="source_end_seconds"),
-        encoding="utf-8",
-    )
+    write_srt_file(final_srt_path, build_srt_text(segments))
+    write_srt_file(source_srt_path, build_srt_text(segments, start_key="source_start_seconds", end_key="source_end_seconds"))
     return json_path, final_srt_path, source_srt_path
 
 
@@ -2708,6 +3243,7 @@ def command_extract(args: argparse.Namespace) -> int:
             max_frames=int(extract_settings["max_frames"]),
             jpeg_quality=int(extract_settings["jpeg_quality"]),
             resize_for_llm=int(extract_settings["resize_for_llm"]),
+            ffmpeg_override=getattr(args, "ffmpeg", None),
         )
     return 0
 
@@ -2715,6 +3251,7 @@ def command_extract(args: argparse.Namespace) -> int:
 def command_infer(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
     config = load_pipeline_config(Path(args.config).expanduser())
+    apply_prompt_overrides(config, args)
     provider_config = resolve_provider_config(config, args)
     provider_selection = build_provider(provider_config)
     provider = provider_selection.provider
@@ -2822,16 +3359,6 @@ def command_review(args: argparse.Namespace) -> int:
     review_settings = resolve_review_settings(config, args)
     stem = args.stem or default_stem(float(review_settings["target_seconds"]))
     output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
-
-    segments = build_review_segments(payload, review_settings)
-    outputs = write_review_outputs(
-        payload=payload,
-        input_path=input_path,
-        output_dir=output_dir,
-        stem=stem,
-        review_settings=review_settings,
-        segments=segments,
-    )
     preview_settings = copy.deepcopy(config["preview"])
     if args.preview_resolution:
         preview_settings["resolution"] = args.preview_resolution
@@ -2839,21 +3366,52 @@ def command_review(args: argparse.Namespace) -> int:
         preview_settings["crf"] = int(args.preview_crf)
     if args.preview_preset:
         preview_settings["preset"] = args.preview_preset
-
-    preview_path = render_preview_if_requested(
-        requested=bool(args.preview or preview_settings.get("enabled", False)),
-        preview_settings=preview_settings,
-        ffmpeg_override=args.ffmpeg,
-        payload=payload,
-        output_dir=output_dir,
-        stem=stem,
-        segments=segments,
-    )
-
-    for path in outputs.values():
-        logging.info("Wrote %s", path)
-    if preview_path:
-        logging.info("Wrote %s", preview_path)
+    variants = build_review_variants(payload, review_settings)
+    manifest_variants: list[dict[str, Any]] = []
+    total_variants = len(variants)
+    for variant in variants:
+        variant_index = int(variant["index"])
+        variant_segments = list(variant["segments"])
+        current_stem = variant_stem(stem, variant_index, total_variants)
+        outputs = write_review_outputs(
+            payload=payload,
+            input_path=input_path,
+            output_dir=output_dir,
+            stem=current_stem,
+            review_settings=review_settings,
+            segments=variant_segments,
+        )
+        preview_path, preview_srt_path = render_preview_if_requested(
+            requested=bool(args.preview or preview_settings.get("enabled", False)),
+            preview_settings=preview_settings,
+            ffmpeg_override=args.ffmpeg,
+            payload=payload,
+            output_dir=output_dir,
+            stem=current_stem,
+            segments=variant_segments,
+        )
+        manifest_entry = {"index": variant_index, "stem": current_stem, **{key: str(path) for key, path in outputs.items()}}
+        if preview_path:
+            manifest_entry["preview"] = str(preview_path)
+        if preview_srt_path:
+            manifest_entry["preview_srt"] = str(preview_srt_path)
+        manifest_variants.append(manifest_entry)
+        for path in outputs.values():
+            logging.info("Wrote %s", path)
+        if preview_path:
+            logging.info("Wrote %s", preview_path)
+        if preview_srt_path:
+            logging.info("Wrote %s", preview_srt_path)
+    if total_variants > 1:
+        manifest_path = output_dir / f"{stem}.review.index.json"
+        manifest_payload = {
+            "stage": "review_index",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "variant_count": total_variants,
+            "variants": manifest_variants,
+        }
+        manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        logging.info("Wrote %s", manifest_path)
     return 0
 
 
@@ -2870,18 +3428,8 @@ def command_render(args: argparse.Namespace) -> int:
     if args.target_seconds is not None:
         review_settings["target_seconds"] = float(args.target_seconds)
 
-    segments = build_review_segments(payload, review_settings)
     render_settings = resolve_render_settings(config, args)
     stem = args.stem or infer_render_stem(input_path, float(review_settings["target_seconds"]))
-    json_path, final_srt_path, source_srt_path = write_render_outputs(
-        payload=payload,
-        input_path=input_path,
-        output_dir=output_dir,
-        stem=stem,
-        segments=segments,
-        render_settings=render_settings,
-    )
-
     source_path_text = str(payload["video"].get("source_path", "")).strip()
     if not source_path_text:
         raise ValueError("Rendering requires a source video path in the input JSON.")
@@ -2889,22 +3437,55 @@ def command_render(args: argparse.Namespace) -> int:
     video_meta = probe_video(source_path)
     scale_height = parse_resolution(str(render_settings["resolution"]), video_meta.height)
     ffmpeg_path = find_ffmpeg(args.ffmpeg)
-    output_video = output_dir / f"{stem}.mp4"
-
-    render_video(
-        ffmpeg_path=ffmpeg_path,
-        source_video=source_path,
-        output_video=output_video,
-        clips=segments,
-        preset=str(render_settings["preset"]),
-        crf=int(render_settings["crf"]),
-        scale_height=scale_height,
-    )
-
-    logging.info("Wrote %s", json_path)
-    logging.info("Wrote %s", final_srt_path)
-    logging.info("Wrote %s", source_srt_path)
-    logging.info("Wrote %s", output_video)
+    variants = build_review_variants(payload, review_settings)
+    manifest_variants: list[dict[str, Any]] = []
+    total_variants = len(variants)
+    for variant in variants:
+        variant_index = int(variant["index"])
+        variant_segments = list(variant["segments"])
+        current_stem = variant_stem(stem, variant_index, total_variants)
+        json_path, final_srt_path, source_srt_path = write_render_outputs(
+            payload=payload,
+            input_path=input_path,
+            output_dir=output_dir,
+            stem=current_stem,
+            segments=variant_segments,
+            render_settings=render_settings,
+        )
+        output_video = output_dir / f"{current_stem}.mp4"
+        render_video(
+            ffmpeg_path=ffmpeg_path,
+            source_video=source_path,
+            output_video=output_video,
+            clips=variant_segments,
+            preset=str(render_settings["preset"]),
+            crf=int(render_settings["crf"]),
+            scale_height=scale_height,
+        )
+        manifest_variants.append(
+            {
+                "index": variant_index,
+                "stem": current_stem,
+                "json": str(json_path),
+                "final_srt": str(final_srt_path),
+                "source_srt": str(source_srt_path),
+                "video": str(output_video),
+            }
+        )
+        logging.info("Wrote %s", json_path)
+        logging.info("Wrote %s", final_srt_path)
+        logging.info("Wrote %s", source_srt_path)
+        logging.info("Wrote %s", output_video)
+    if total_variants > 1:
+        manifest_path = output_dir / f"{stem}.render.index.json"
+        manifest_payload = {
+            "stage": "render_index",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "variant_count": total_variants,
+            "variants": manifest_variants,
+        }
+        manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        logging.info("Wrote %s", manifest_path)
     return 0
 
 
@@ -2931,24 +3512,40 @@ def command_run(args: argparse.Namespace) -> int:
             window_stride=1.5,
             contact_sheet_frames=6,
             final_duration_seconds=float(args.target_seconds or config["review"]["target_seconds"]),
+            top_highlights=int(args.top_highlights or config["review"].get("top_highlights", 1)),
             log_level=args.log_level,
         )
         command_temporal(temporal_args)
 
         if bool(getattr(args, "skip_review", False)):
             render_input = video_output_dir / "analysis.json"
+            command_render(argparse.Namespace(**vars(video_args), input=str(render_input), output_dir=str(video_output_dir)))
         else:
             review_args = argparse.Namespace(**vars(video_args))
             review_args.input = str(video_output_dir / "analysis.json")
             review_args.output_dir = str(video_output_dir)
-            command_review(review_args)
-            review_stem = review_args.stem or default_stem(float(review_args.target_seconds or config["review"]["target_seconds"]))
-            render_input = video_output_dir / f"{review_stem}.editable.json"
-
-        render_args = argparse.Namespace(**vars(video_args))
-        render_args.input = str(render_input)
-        render_args.output_dir = str(video_output_dir)
-        command_render(render_args)
+            review_settings = resolve_review_settings(config, review_args)
+            review_stem = review_args.stem or default_stem(float(review_settings["target_seconds"]))
+            variants = build_review_variants(load_payload(Path(review_args.input), None), review_settings)
+            total_variants = len(variants)
+            for variant in variants:
+                variant_index = int(variant["index"])
+                current_stem = variant_stem(review_stem, variant_index, total_variants)
+                outputs = write_review_outputs(
+                    payload=load_payload(Path(review_args.input), None),
+                    input_path=Path(review_args.input),
+                    output_dir=video_output_dir,
+                    stem=current_stem,
+                    review_settings=review_settings,
+                    segments=list(variant["segments"]),
+                )
+                for path in outputs.values():
+                    logging.info("Wrote %s", path)
+                render_args = argparse.Namespace(**vars(video_args))
+                render_args.input = str(outputs["editable_json"])
+                render_args.output_dir = str(video_output_dir)
+                render_args.stem = current_stem
+                command_render(render_args)
     return 0
 
 

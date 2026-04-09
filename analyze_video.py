@@ -45,6 +45,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "timeout_seconds": 120,
     },
     "prompt": {
+        "preset": "default",
         "positive_labels": [
             "bend",
             "scenery",
@@ -63,6 +64,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "blur",
             "low_value_straight",
         ],
+        "extra_positive_labels": [],
+        "extra_negative_labels": [],
+        "extra_instructions": "",
         "system_instructions": (
             "You review forward-fixed motorcycle footage exported from Insta360 Studio. "
             "Keep only visually valuable moments for a short-form highlight edit. "
@@ -82,6 +86,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi"}
+
+PROMPT_PRESET_SYSTEM_APPEND: dict[str, str] = {
+    "default": "",
+    "douyin_riding": (
+        "Optimize for short-form riding highlights that feel strong in the first three seconds. "
+        "Prefer moments with visible lean angle changes, overtake tension, close traffic interaction, "
+        "tunnel in/out transitions, scenery bursts, speed sensation, and clear motion progression. "
+        "For JSON reasons, use concise Chinese phrases that are useful as short-video editing notes."
+    ),
+}
+
+PROMPT_PRESET_USER_APPEND: dict[str, str] = {
+    "default": "",
+    "douyin_riding": (
+        "Short-video goal: find moments that can anchor a punchy 30-second Douyin/TikTok-style riding clip.\n"
+        "Prefer clear hooks such as hard lean-in, rapid rhythm change, close pass, overtake, exit-to-scenery reveal, "
+        "or obvious speed sensation.\n"
+        "Write reason/discard_reason as concise Chinese snippets, ideally under 18 characters."
+    ),
+}
 
 
 @dataclass
@@ -204,13 +228,20 @@ def encode_frame(frame: np.ndarray, jpeg_quality: int) -> str:
 
 
 def build_user_prompt(config: dict[str, Any], timestamp_seconds: float) -> str:
-    positive_labels = ", ".join(config["prompt"]["positive_labels"])
-    negative_labels = ", ".join(config["prompt"]["negative_labels"])
-    return (
-        f"Timestamp: {timestamp_seconds:.2f} seconds.\n"
-        "The image comes from a forward-fixed motorcycle riding video.\n"
-        f"Positive labels: {positive_labels}.\n"
-        f"Negative labels: {negative_labels}.\n"
+    prompt_config = config["prompt"]
+    positive_labels = ", ".join(resolve_prompt_labels(prompt_config, "positive_labels", "extra_positive_labels"))
+    negative_labels = ", ".join(resolve_prompt_labels(prompt_config, "negative_labels", "extra_negative_labels"))
+    preset = normalize_prompt_preset(prompt_config.get("preset", "default"))
+    preset_instructions = PROMPT_PRESET_USER_APPEND.get(preset, "")
+    sections = [
+        f"Timestamp: {timestamp_seconds:.2f} seconds.",
+        "The image comes from a forward-fixed motorcycle riding video.",
+        f"Positive labels: {positive_labels}.",
+        f"Negative labels: {negative_labels}.",
+    ]
+    if preset_instructions:
+        sections.append(preset_instructions)
+    sections.append(
         "Return JSON with this exact schema:\n"
         '{'
         '"keep": true or false, '
@@ -221,6 +252,34 @@ def build_user_prompt(config: dict[str, Any], timestamp_seconds: float) -> str:
         '}\n'
         "Do not add markdown or commentary."
     )
+    return "\n".join(sections)
+
+
+def normalize_prompt_preset(value: Any) -> str:
+    preset = str(value or "default").strip().lower()
+    return preset if preset in PROMPT_PRESET_SYSTEM_APPEND else "default"
+
+
+def resolve_prompt_labels(prompt_config: dict[str, Any], base_key: str, extra_key: str) -> list[str]:
+    values: list[str] = []
+    for raw_value in list(prompt_config.get(base_key, [])) + list(prompt_config.get(extra_key, [])):
+        label = str(raw_value).strip()
+        if label and label not in values:
+            values.append(label)
+    return values
+
+
+def build_system_prompt(config: dict[str, Any]) -> str:
+    prompt_config = config["prompt"]
+    sections = [str(prompt_config.get("system_instructions", "")).strip()]
+    preset = normalize_prompt_preset(prompt_config.get("preset", "default"))
+    preset_append = PROMPT_PRESET_SYSTEM_APPEND.get(preset, "")
+    if preset_append:
+        sections.append(preset_append)
+    extra_instructions = str(prompt_config.get("extra_instructions", "")).strip()
+    if extra_instructions:
+        sections.append(extra_instructions)
+    return "\n\n".join(section for section in sections if section)
 
 
 def call_ollama(image_base64: str, timestamp_seconds: float, config: dict[str, Any]) -> dict[str, Any]:
@@ -232,10 +291,10 @@ def call_ollama(image_base64: str, timestamp_seconds: float, config: dict[str, A
             "temperature": float(ollama["temperature"]),
         },
         "messages": [
-            {
-                "role": "system",
-                "content": config["prompt"]["system_instructions"],
-            },
+                {
+                    "role": "system",
+                    "content": build_system_prompt(config),
+                },
             {
                 "role": "user",
                 "content": build_user_prompt(config, timestamp_seconds),

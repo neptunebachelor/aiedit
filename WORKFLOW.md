@@ -8,6 +8,24 @@ The main entry point is:
 python pipeline.py <stage> ...
 ```
 
+For one-shot processing you can also run the full pipeline:
+
+```bash
+python pipeline.py run --video ./input/ride01.mp4
+```
+
+To generate multiple 30-second continuous highlight variants with a stronger short-video bias:
+
+```bash
+python pipeline.py run \
+  --video ./input/ride01.mp4 \
+  --selection-mode single_continuous \
+  --top-highlights 5 \
+  --prompt-preset douyin_riding \
+  --caption-style douyin \
+  --caption-detail-prefix "Hook: "
+```
+
 ## Overview
 
 There are four primary stages:
