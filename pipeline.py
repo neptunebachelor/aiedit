@@ -74,8 +74,8 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
     "filters": copy.deepcopy(LEGACY_DEFAULT_CONFIG["filters"]),
     "provider": {
         "routing": "auto",
+        "auto_order": ["local", "qwen", "gemini"],
         "submission_mode": "auto",
-        "type": "ollama",
         "enabled": True,
         "temperature": 0.1,
         "timeout_seconds": 120,
@@ -84,6 +84,7 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
             "supports_vision": True,
             "api_base": "http://127.0.0.1:11434",
             "model": "qwen3-vl:8b",
+            "models": ["qwen3-vl:8b"],
         },
         "gemini": {
             "enabled": True,
@@ -94,6 +95,7 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
             "min_request_interval_seconds": 0.0,
             "api_base": "https://generativelanguage.googleapis.com/v1beta/openai/",
             "model": "gemini-3-flash-preview",
+            "models": ["gemini-3-flash-preview"],
             "api_key": "",
             "api_key_env": "GEMINI_API_KEY",
             "image_transport": "base64",
@@ -106,6 +108,7 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
             "supports_vision": True,
             "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "model": "qwen3-vl-flash",
+            "models": ["qwen3-vl-flash"],
             "api_key": "",
             "api_key_env": "DASHSCOPE_API_KEY",
             "image_transport": "base64",
@@ -114,18 +117,6 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
             "extra_body": {
                 "enable_thinking": False,
             },
-        },
-        "openai_compatible": {
-            "enabled": True,
-            "profile": "deepseek_v3_2",
-            "supports_vision": False,
-            "api_base": "https://api.deepseek.com",
-            "model": "deepseek-chat",
-            "api_key": "",
-            "api_key_env": "DEEPSEEK_API_KEY",
-            "image_transport": "base64",
-            "image_url_template": "",
-            "json_output": True,
         },
     },
     "prompt": copy.deepcopy(LEGACY_DEFAULT_CONFIG["prompt"]),
@@ -160,6 +151,14 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
         "crf": 18,
         "preset": "fast",
     },
+}
+
+ALLOWED_PROVIDER_ROUTES = ("local", "qwen", "gemini")
+DEFAULT_PROVIDER_AUTO_ORDER = list(ALLOWED_PROVIDER_ROUTES)
+PROVIDER_ROUTE_TO_TYPE = {
+    "local": "ollama",
+    "qwen": "qwen",
+    "gemini": "gemini",
 }
 
 HUMAN_LABELS = {
@@ -267,6 +266,7 @@ class ProviderSelection:
     route: str
     provider_type: str
     profile: str
+    selected_model: str
     provider: Any
     snapshot: dict[str, Any]
     execution_mode: str = "sync"
@@ -356,6 +356,64 @@ def parse_batch_request_key(key: str) -> int | None:
 def safe_filename_stem(value: str) -> str:
     allowed = {"-", "_", "."}
     return "".join(char if char.isalnum() or char in allowed else "_" for char in value).strip("._") or "batch"
+
+
+def normalize_provider_auto_order(value: Any) -> list[str]:
+    if value is None:
+        order = list(DEFAULT_PROVIDER_AUTO_ORDER)
+    elif isinstance(value, str):
+        order = [item.strip().lower() for item in value.split(",")]
+    elif isinstance(value, (list, tuple)):
+        order = [str(item).strip().lower() for item in value]
+    else:
+        raise ValueError("provider.auto_order must be a list of provider routes.")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for route in order:
+        if not route:
+            raise ValueError("provider.auto_order cannot contain empty entries.")
+        if route not in ALLOWED_PROVIDER_ROUTES:
+            raise ValueError(
+                f"Unsupported provider route in auto order: {route!r}. "
+                f"Expected one of {', '.join(ALLOWED_PROVIDER_ROUTES)}."
+            )
+        if route in seen:
+            raise ValueError(f"Duplicate provider route in auto order: {route!r}.")
+        seen.add(route)
+        normalized.append(route)
+
+    if not normalized:
+        raise ValueError("provider.auto_order must contain at least one provider route.")
+    return normalized
+
+
+def normalize_provider_models(section: dict[str, Any], *, provider_name: str) -> list[str]:
+    raw_models = section.get("models")
+    if raw_models is None:
+        raw_models = section.get("model")
+
+    if raw_models is None:
+        raise ValueError(f"{provider_name} must define at least one model.")
+    if isinstance(raw_models, str):
+        models = [item.strip() for item in raw_models.split(",")]
+    elif isinstance(raw_models, (list, tuple)):
+        models = [str(item).strip() for item in raw_models]
+    else:
+        raise ValueError(f"{provider_name}.models must be a list of model names.")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for model in models:
+        if not model:
+            raise ValueError(f"{provider_name}.models cannot contain empty entries.")
+        if model in seen:
+            raise ValueError(f"Duplicate model in {provider_name}.models: {model!r}.")
+        seen.add(model)
+        normalized.append(model)
+    if not normalized:
+        raise ValueError(f"{provider_name}.models must contain at least one model.")
+    return normalized
 
 
 class OllamaVisionProvider:
@@ -745,6 +803,121 @@ class GeminiBatchVisionProvider:
         return manifest_path
 
 
+class ModelFailoverVisionProvider:
+    def __init__(self, *, route: str, models: list[str], provider_factory: Any) -> None:
+        self.route = route
+        self.models = list(models)
+        self.provider_factory = provider_factory
+        self.current_index = 0
+        self._providers: dict[int, VisionProvider] = {}
+
+    @property
+    def selected_model(self) -> str:
+        return self.models[self.current_index]
+
+    def _provider_for_index(self, index: int) -> VisionProvider:
+        if index not in self._providers:
+            self._providers[index] = self.provider_factory(self.models[index])
+        return self._providers[index]
+
+    def infer(
+        self,
+        image_bytes: bytes,
+        *,
+        image_path: Path | None,
+        timestamp_seconds: float,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        index = self.current_index
+        while True:
+            provider = self._provider_for_index(index)
+            try:
+                decision = provider.infer(
+                    image_bytes,
+                    image_path=image_path,
+                    timestamp_seconds=timestamp_seconds,
+                    config=config,
+                )
+                self.current_index = index
+                return decision
+            except Exception as exc:  # noqa: BLE001
+                if retry_delay_for_exception(exc) is not None or not should_fail_over_model(exc):
+                    raise
+                next_index = index + 1
+                if next_index >= len(self.models):
+                    raise
+                logging.warning(
+                    "Provider %s model %s failed (%s); retrying with fallback model %s.",
+                    self.route,
+                    self.models[index],
+                    summarize_provider_exception(exc),
+                    self.models[next_index],
+                )
+                index = next_index
+                self.current_index = next_index
+
+
+class ModelFailoverAsyncBatchProvider:
+    def __init__(self, *, route: str, models: list[str], provider_factory: Any) -> None:
+        self.route = route
+        self.models = list(models)
+        self.provider_factory = provider_factory
+        self.current_index = 0
+        self._providers: dict[int, AsyncBatchVisionProvider] = {}
+
+    @property
+    def selected_model(self) -> str:
+        return self.models[self.current_index]
+
+    def _provider_for_index(self, index: int) -> AsyncBatchVisionProvider:
+        if index not in self._providers:
+            self._providers[index] = self.provider_factory(self.models[index])
+        return self._providers[index]
+
+    def submit_batch(
+        self,
+        *,
+        index_path: Path,
+        provider_snapshot: dict[str, Any],
+        prompt_snapshot: dict[str, Any],
+        selection_snapshot: dict[str, Any],
+        force_resubmit: bool,
+    ) -> Path:
+        index = self.current_index
+        while True:
+            provider = self._provider_for_index(index)
+            try:
+                self.current_index = index
+                return provider.submit_batch(
+                    index_path=index_path,
+                    provider_snapshot=provider_snapshot_with_model(provider_snapshot, self.models[index]),
+                    prompt_snapshot=prompt_snapshot,
+                    selection_snapshot=selection_snapshot,
+                    force_resubmit=force_resubmit,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if retry_delay_for_exception(exc) is not None or not should_fail_over_model(exc):
+                    raise
+                next_index = index + 1
+                if next_index >= len(self.models):
+                    raise
+                logging.warning(
+                    "Batch provider %s model %s failed (%s); retrying with fallback model %s.",
+                    self.route,
+                    self.models[index],
+                    summarize_provider_exception(exc),
+                    self.models[next_index],
+                )
+                index = next_index
+                self.current_index = next_index
+
+    def collect_batch(self, manifest_path: Path) -> Path:
+        return self._provider_for_index(self.current_index).collect_batch(manifest_path)
+
+    def cancel_batch(self, manifest_path: Path) -> Path:
+        return self._provider_for_index(self.current_index).cancel_batch(manifest_path)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Cross-platform video highlight pipeline with extract / infer / review / render stages."
@@ -770,14 +943,18 @@ def parse_args() -> argparse.Namespace:
     infer_parser.add_argument("--extract-index", help="Path to extract/index.json. If missing, the pipeline will generate it.")
     infer_parser.add_argument(
         "--provider",
-        choices=["auto", "local", "gemini", "qwen", "api"],
-        help="Provider routing for this run. auto prefers local Ollama, then Gemini, then Qwen, then generic API.",
+        choices=["auto", "local", "qwen", "gemini"],
+        help="Provider routing for this run. auto uses the configured fallback order.",
     )
-    infer_parser.add_argument("--provider-type", choices=["ollama", "openai_compatible"])
+    infer_parser.add_argument(
+        "--provider-auto-order",
+        nargs="+",
+        help="Fallback provider order used when routing=auto. Example: local qwen gemini.",
+    )
     infer_parser.add_argument("--api-base", help="Provider API base URL.")
     infer_parser.add_argument("--api-key", help="API key for third-party providers.")
     infer_parser.add_argument("--api-key-env", help="Environment variable used to read the API key.")
-    infer_parser.add_argument("--model", help="Vision model name.")
+    infer_parser.add_argument("--model", help="Override the first model used for the selected provider.")
     infer_parser.add_argument("--ffmpeg", help="Optional path to ffmpeg executable used if extract runs implicitly.")
     infer_parser.add_argument("--temperature", type=float, help="Sampling temperature for the provider.")
     infer_parser.add_argument("--timeout-seconds", type=float, help="Provider timeout in seconds.")
@@ -902,14 +1079,18 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--extract-index", help="Optional extract/index.json. Skips extract when provided.")
     run_parser.add_argument(
         "--provider",
-        choices=["auto", "local", "gemini", "qwen", "api"],
-        help="Provider routing for this run. auto prefers local Ollama, then Gemini, then Qwen, then generic API.",
+        choices=["auto", "local", "qwen", "gemini"],
+        help="Provider routing for this run. auto uses the configured fallback order.",
     )
-    run_parser.add_argument("--provider-type", choices=["ollama", "openai_compatible"])
+    run_parser.add_argument(
+        "--provider-auto-order",
+        nargs="+",
+        help="Fallback provider order used when routing=auto. Example: local qwen gemini.",
+    )
     run_parser.add_argument("--api-base", help="Provider API base URL.")
     run_parser.add_argument("--api-key", help="API key for third-party providers.")
     run_parser.add_argument("--api-key-env", help="Environment variable used to read the API key.")
-    run_parser.add_argument("--model", help="Vision model name.")
+    run_parser.add_argument("--model", help="Override the first model used for the selected provider.")
     run_parser.add_argument("--temperature", type=float, help="Sampling temperature for the provider.")
     run_parser.add_argument("--timeout-seconds", type=float, help="Provider timeout in seconds.")
     run_parser.add_argument(
@@ -1127,17 +1308,21 @@ def load_pipeline_config(path: Path) -> dict[str, Any]:
         legacy_provider_type = str(raw_provider.get("type", "")).strip()
         if legacy_provider_type == "ollama":
             provider["routing"] = "local"
-        elif legacy_provider_type == "openai_compatible":
-            provider["routing"] = "api"
-    deepseek_base_url = str(os.environ.get("DEEPSEEK_BASE_URL", "")).strip()
-    if deepseek_base_url:
-        provider["openai_compatible"]["api_base"] = deepseek_base_url
+    provider.pop("type", None)
+    provider.pop("openai_compatible", None)
     gemini_base_url = str(os.environ.get("GEMINI_BASE_URL", "")).strip()
     if gemini_base_url:
         provider["gemini"]["api_base"] = gemini_base_url
     dashscope_base_url = str(os.environ.get("DASHSCOPE_BASE_URL", "")).strip()
     if dashscope_base_url:
         provider["qwen"]["api_base"] = dashscope_base_url
+    provider["auto_order"] = normalize_provider_auto_order(provider.get("auto_order"))
+    provider["ollama"]["models"] = normalize_provider_models(provider["ollama"], provider_name="provider.ollama")
+    provider["ollama"]["model"] = provider["ollama"]["models"][0]
+    provider["gemini"]["models"] = normalize_provider_models(provider["gemini"], provider_name="provider.gemini")
+    provider["gemini"]["model"] = provider["gemini"]["models"][0]
+    provider["qwen"]["models"] = normalize_provider_models(provider["qwen"], provider_name="provider.qwen")
+    provider["qwen"]["model"] = provider["qwen"]["models"][0]
     config["provider"] = provider
 
     config["review"] = deep_merge_dict(config["review"], raw.get("review", {}))
@@ -1481,24 +1666,26 @@ def resolve_provider_config(config: dict[str, Any], args: argparse.Namespace) ->
         provider["routing"] = args.provider
     if getattr(args, "submission_mode", None):
         provider["submission_mode"] = args.submission_mode
-    if getattr(args, "provider_type", None):
-        provider["type"] = args.provider_type
     if getattr(args, "temperature", None) is not None:
         provider["temperature"] = float(args.temperature)
     if getattr(args, "timeout_seconds", None) is not None:
         provider["timeout_seconds"] = float(args.timeout_seconds)
 
     provider_target = infer_provider_target(args, provider)
+    if getattr(args, "provider_auto_order", None) is not None:
+        provider["auto_order"] = normalize_provider_auto_order(args.provider_auto_order)
     if provider_target == "local":
         if getattr(args, "api_base", None):
             provider["ollama"]["api_base"] = args.api_base
         if getattr(args, "model", None):
             provider["ollama"]["model"] = args.model
+            provider["ollama"]["models"] = [str(args.model).strip()]
     elif provider_target == "gemini":
         if getattr(args, "api_base", None):
             provider["gemini"]["api_base"] = args.api_base
         if getattr(args, "model", None):
             provider["gemini"]["model"] = args.model
+            provider["gemini"]["models"] = [str(args.model).strip()]
         if getattr(args, "api_key", None):
             provider["gemini"]["api_key"] = args.api_key
         if getattr(args, "api_key_env", None):
@@ -1508,32 +1695,25 @@ def resolve_provider_config(config: dict[str, Any], args: argparse.Namespace) ->
             provider["qwen"]["api_base"] = args.api_base
         if getattr(args, "model", None):
             provider["qwen"]["model"] = args.model
+            provider["qwen"]["models"] = [str(args.model).strip()]
         if getattr(args, "api_key", None):
             provider["qwen"]["api_key"] = args.api_key
         if getattr(args, "api_key_env", None):
             provider["qwen"]["api_key_env"] = args.api_key_env
-    elif provider_target == "api":
-        if getattr(args, "api_base", None):
-            provider["openai_compatible"]["api_base"] = args.api_base
-        if getattr(args, "model", None):
-            provider["openai_compatible"]["model"] = args.model
-        if getattr(args, "api_key", None):
-            provider["openai_compatible"]["api_key"] = args.api_key
-        if getattr(args, "api_key_env", None):
-            provider["openai_compatible"]["api_key_env"] = args.api_key_env
+    provider["auto_order"] = normalize_provider_auto_order(provider.get("auto_order"))
+    provider["ollama"]["models"] = normalize_provider_models(provider["ollama"], provider_name="provider.ollama")
+    provider["ollama"]["model"] = provider["ollama"]["models"][0]
+    provider["gemini"]["models"] = normalize_provider_models(provider["gemini"], provider_name="provider.gemini")
+    provider["gemini"]["model"] = provider["gemini"]["models"][0]
+    provider["qwen"]["models"] = normalize_provider_models(provider["qwen"], provider_name="provider.qwen")
+    provider["qwen"]["model"] = provider["qwen"]["models"][0]
     return provider
 
 
 def infer_provider_target(args: argparse.Namespace, provider_config: dict[str, Any]) -> str | None:
     explicit_provider = str(getattr(args, "provider", "") or "").strip().lower()
-    if explicit_provider in {"local", "gemini", "qwen", "api"}:
+    if explicit_provider in {"local", "gemini", "qwen"}:
         return explicit_provider
-
-    explicit_type = str(getattr(args, "provider_type", "") or "").strip().lower()
-    if explicit_type == "ollama":
-        return "local"
-    if explicit_type == "openai_compatible":
-        return "api"
 
     api_base = str(getattr(args, "api_base", "") or "").strip().lower()
     api_key_env = str(getattr(args, "api_key_env", "") or "").strip().upper()
@@ -1541,21 +1721,17 @@ def infer_provider_target(args: argparse.Namespace, provider_config: dict[str, A
         return "gemini"
     if "dashscope" in api_base or api_key_env == "DASHSCOPE_API_KEY":
         return "qwen"
-    if getattr(args, "api_base", None) or getattr(args, "api_key", None) or getattr(args, "api_key_env", None):
-        return "api"
 
     model_name = str(getattr(args, "model", "") or "").strip().lower()
     if model_name.startswith("gemini-"):
         return "gemini"
     if model_name.startswith("qwen"):
         return "qwen"
-    if model_name.startswith(("deepseek-", "gpt-", "claude-")):
-        return "api"
     if ":" in model_name:
         return "local"
 
     routing = str(provider_config.get("routing", "auto")).strip().lower()
-    if routing in {"local", "gemini", "qwen", "api"}:
+    if routing in {"local", "gemini", "qwen"}:
         return routing
     return None
 
@@ -1592,17 +1768,22 @@ def resolve_api_key(api_config: dict[str, Any]) -> str:
     return api_key
 
 
-def sanitize_provider_snapshot(provider_config: dict[str, Any], *, route: str, provider_type: str) -> dict[str, Any]:
+def sanitize_provider_snapshot(
+    provider_config: dict[str, Any],
+    *,
+    route: str,
+    provider_type: str,
+    selected_model: str,
+) -> dict[str, Any]:
     snapshot = copy.deepcopy(provider_config)
     snapshot["routing"] = str(provider_config.get("routing", "auto")).strip().lower()
     snapshot["selected_route"] = route
     snapshot["selected_provider_type"] = provider_type
+    snapshot["selected_model"] = str(selected_model).strip()
     if "gemini" in snapshot:
         snapshot["gemini"]["api_key"] = ""
     if "qwen" in snapshot:
         snapshot["qwen"]["api_key"] = ""
-    if "openai_compatible" in snapshot:
-        snapshot["openai_compatible"]["api_key"] = ""
     return snapshot
 
 
@@ -1615,21 +1796,25 @@ def validate_remote_provider(route: str, remote_config: dict[str, Any]) -> tuple
     if not api_key:
         return False, f"{route} unavailable (missing api key)", ""
     api_base = str(remote_config.get("api_base", "")).strip()
-    model = str(remote_config.get("model", "")).strip()
-    if not api_base or not model:
-        return False, f"{route} unavailable (missing api_base or model)", ""
+    if not api_base:
+        return False, f"{route} unavailable (missing api_base)", ""
+    try:
+        normalize_provider_models(remote_config, provider_name=f"provider.{route}")
+    except ValueError as exc:
+        return False, f"{route} unavailable ({exc})", ""
     return True, "", api_key
 
 
 def build_openai_compatible_provider(
     remote_config: dict[str, Any],
     *,
+    model: str,
     temperature: float,
     timeout_seconds: float,
 ) -> OpenAICompatibleVisionProvider:
     return OpenAICompatibleVisionProvider(
         api_base=str(remote_config["api_base"]).strip(),
-        model=str(remote_config["model"]).strip(),
+        model=str(model).strip(),
         api_key=resolve_api_key(remote_config),
         temperature=temperature,
         timeout_seconds=timeout_seconds,
@@ -1643,12 +1828,13 @@ def build_openai_compatible_provider(
 def build_gemini_batch_provider(
     remote_config: dict[str, Any],
     *,
+    model: str,
     temperature: float,
     timeout_seconds: float,
 ) -> GeminiBatchVisionProvider:
     return GeminiBatchVisionProvider(
         api_key=resolve_api_key(remote_config),
-        model=str(remote_config["model"]).strip(),
+        model=str(model).strip(),
         temperature=temperature,
         timeout_seconds=timeout_seconds,
     )
@@ -1676,27 +1862,19 @@ def build_provider(provider_config: dict[str, Any]) -> ProviderSelection:
     if not bool(provider_config.get("enabled", True)):
         raise ValueError("Provider is disabled in configuration.")
 
-    provider_type = str(provider_config.get("type", "ollama")).strip()
     temperature = float(provider_config.get("temperature", 0.1))
     timeout_seconds = float(provider_config.get("timeout_seconds", 120))
     routing = str(provider_config.get("routing", "auto")).strip().lower()
-    if routing not in {"auto", "local", "gemini", "qwen", "api"}:
+    if routing not in {"auto", "local", "qwen", "gemini"}:
         raise ValueError(f"Unsupported provider routing: {routing}")
+    auto_order = normalize_provider_auto_order(provider_config.get("auto_order"))
 
     local_config = provider_config["ollama"]
     gemini_config = provider_config["gemini"]
     qwen_config = provider_config["qwen"]
-    api_config = provider_config["openai_compatible"]
 
-    candidates: list[tuple[str, str]] = []
-    if routing in {"auto", "local"}:
-        candidates.append(("local", "ollama"))
-    if routing in {"auto", "gemini"}:
-        candidates.append(("gemini", "gemini"))
-    if routing in {"auto", "qwen"}:
-        candidates.append(("qwen", "qwen"))
-    if routing in {"auto", "api"}:
-        candidates.append(("api", "openai_compatible"))
+    candidate_routes = auto_order if routing == "auto" else [routing]
+    candidates: list[tuple[str, str]] = [(route, PROVIDER_ROUTE_TO_TYPE[route]) for route in candidate_routes]
 
     failures: list[str] = []
     for route, resolved_provider_type in candidates:
@@ -1704,23 +1882,30 @@ def build_provider(provider_config: dict[str, Any]) -> ProviderSelection:
             if not bool(local_config.get("enabled", True)):
                 failures.append("local disabled")
                 continue
-            reachable, reason = is_ollama_available(
-                api_base=str(local_config.get("api_base", "")).strip(),
-                model=str(local_config.get("model", "")).strip(),
-                timeout_seconds=timeout_seconds,
-            )
-            if not reachable:
-                failures.append(f"local unavailable ({reason})")
-                if routing == "local":
-                    continue
+            selected_model = ""
+            local_failures: list[str] = []
+            for candidate_model in normalize_provider_models(local_config, provider_name="provider.ollama"):
+                reachable, reason = is_ollama_available(
+                    api_base=str(local_config.get("api_base", "")).strip(),
+                    model=candidate_model,
+                    timeout_seconds=timeout_seconds,
+                )
+                if reachable:
+                    selected_model = candidate_model
+                    break
+                local_failures.append(f"{candidate_model}: {reason}")
+            if not selected_model:
+                detail = "; ".join(local_failures) if local_failures else "no usable models configured"
+                failures.append(f"local unavailable ({detail})")
                 continue
             return ProviderSelection(
                 route=route,
                 provider_type=resolved_provider_type,
                 profile=str(local_config.get("model", "")).strip() or "ollama",
+                selected_model=selected_model,
                 provider=OllamaVisionProvider(
                     api_base=str(local_config["api_base"]).strip(),
-                    model=str(local_config["model"]).strip(),
+                    model=selected_model,
                     temperature=temperature,
                     timeout_seconds=timeout_seconds,
                 ),
@@ -1728,52 +1913,77 @@ def build_provider(provider_config: dict[str, Any]) -> ProviderSelection:
                     provider_config,
                     route=route,
                     provider_type=resolved_provider_type,
+                    selected_model=selected_model,
                 ),
             )
 
         if route == "gemini":
             remote_config = gemini_config
-        elif route == "qwen":
-            remote_config = qwen_config
         else:
-            remote_config = api_config
+            remote_config = qwen_config
         valid, failure, _ = validate_remote_provider(route, remote_config)
         if not valid:
             failures.append(failure)
             continue
+        models = normalize_provider_models(remote_config, provider_name=f"provider.{route}")
         execution_mode = resolve_execution_mode(route, provider_config, remote_config)
         if route == "gemini" and execution_mode == "async_batch":
-            provider_instance = build_gemini_batch_provider(
-                remote_config,
-                temperature=temperature,
-                timeout_seconds=timeout_seconds,
+            provider_instance = ModelFailoverAsyncBatchProvider(
+                route=route,
+                models=models,
+                provider_factory=lambda model, remote_config=remote_config: build_gemini_batch_provider(
+                    remote_config,
+                    model=model,
+                    temperature=temperature,
+                    timeout_seconds=timeout_seconds,
+                ),
             )
         else:
-            provider_instance = build_openai_compatible_provider(
-                remote_config,
-                temperature=temperature,
-                timeout_seconds=timeout_seconds,
+            provider_instance = ModelFailoverVisionProvider(
+                route=route,
+                models=models,
+                provider_factory=lambda model, remote_config=remote_config: build_openai_compatible_provider(
+                    remote_config,
+                    model=model,
+                    temperature=temperature,
+                    timeout_seconds=timeout_seconds,
+                ),
             )
         return ProviderSelection(
             route=route,
             provider_type=resolved_provider_type,
             profile=str(remote_config.get("profile", "")).strip() or str(remote_config.get("model", "")).strip(),
+            selected_model=provider_instance.selected_model,
             provider=provider_instance,
             snapshot=sanitize_provider_snapshot(
                 provider_config,
                 route=route,
                 provider_type=resolved_provider_type,
+                selected_model=provider_instance.selected_model,
             ),
             execution_mode=execution_mode,
         )
 
-    detail = "; ".join(failures) if failures else f"unsupported provider type: {provider_type}"
+    detail = "; ".join(failures) if failures else "no provider satisfied the current routing and model configuration"
     raise ValueError(f"No available provider for routing={routing}. {detail}")
 
 
 def summarize_provider_exception(exc: Exception) -> str:
     message = str(exc).strip().replace("\r", " ").replace("\n", " ")
     return message[:240] if message else exc.__class__.__name__
+
+
+def provider_snapshot_with_model(provider_snapshot: dict[str, Any], selected_model: str) -> dict[str, Any]:
+    snapshot = copy.deepcopy(provider_snapshot)
+    snapshot["selected_model"] = str(selected_model).strip()
+    return snapshot
+
+
+def current_provider_snapshot(provider_snapshot: dict[str, Any], provider: Any) -> dict[str, Any]:
+    selected_model = str(getattr(provider, "selected_model", "") or getattr(provider, "model", "")).strip()
+    if not selected_model:
+        return provider_snapshot
+    return provider_snapshot_with_model(provider_snapshot, selected_model)
 
 
 def status_code_for_exception(exc: Exception) -> int | None:
@@ -1804,6 +2014,29 @@ def retry_delay_for_exception(exc: Exception) -> float | None:
             except ValueError:
                 pass
     return 15.0
+
+
+def should_fail_over_model(exc: Exception) -> bool:
+    message = summarize_provider_exception(exc).lower()
+    status_code = status_code_for_exception(exc)
+    model_markers = (
+        "unsupported model",
+        "model not found",
+        "invalid model",
+        "no such model",
+        "unknown model",
+        "model does not exist",
+        "model is not available",
+        "does not support model",
+        "not support model",
+        "unsupported_value",
+        "model_not_found",
+    )
+    if any(marker in message for marker in model_markers):
+        return True
+    if status_code in {400, 404} and "model" in message:
+        return True
+    return False
 
 
 def is_fatal_provider_exception(exc: Exception) -> tuple[bool, str]:
@@ -2556,7 +2789,7 @@ def infer_from_extract_index(
         checkpoint_path.unlink()
     progress_path = write_sync_progress(
         index_path,
-        provider_snapshot=provider_snapshot,
+        provider_snapshot=current_provider_snapshot(provider_snapshot, provider),
         total_candidate_frames=len(candidate_frames),
         completed_candidate_frames=len(decisions_by_frame_number),
         resumed_candidate_frames=len(existing_decisions),
@@ -2613,7 +2846,7 @@ def infer_from_extract_index(
                 if processed_this_run == 1 or processed_this_run % 10 == 0:
                     progress_path = write_sync_progress(
                         index_path,
-                        provider_snapshot=provider_snapshot,
+                        provider_snapshot=current_provider_snapshot(provider_snapshot, provider),
                         total_candidate_frames=len(candidate_frames),
                         completed_candidate_frames=len(decisions_by_frame_number),
                         resumed_candidate_frames=len(existing_decisions),
@@ -2623,7 +2856,7 @@ def infer_from_extract_index(
         if fatal_provider_error:
             progress_path = write_sync_progress(
                 index_path,
-                provider_snapshot=provider_snapshot,
+                provider_snapshot=current_provider_snapshot(provider_snapshot, provider),
                 total_candidate_frames=len(candidate_frames),
                 completed_candidate_frames=len(decisions_by_frame_number),
                 resumed_candidate_frames=len(existing_decisions),
@@ -2637,7 +2870,7 @@ def infer_from_extract_index(
         analysis_path = write_infer_outputs(
             index_path,
             extract_payload=payload,
-            provider_snapshot=provider_snapshot,
+            provider_snapshot=current_provider_snapshot(provider_snapshot, provider),
             prompt_snapshot=config["prompt"],
             selection_snapshot=config["selection"],
             decisions_by_frame_number=decisions_by_frame_number,
@@ -2645,7 +2878,7 @@ def infer_from_extract_index(
     except KeyboardInterrupt:
         progress_path = write_sync_progress(
             index_path,
-            provider_snapshot=provider_snapshot,
+            provider_snapshot=current_provider_snapshot(provider_snapshot, provider),
             total_candidate_frames=len(candidate_frames),
             completed_candidate_frames=len(decisions_by_frame_number),
             resumed_candidate_frames=len(existing_decisions),
@@ -2659,7 +2892,7 @@ def infer_from_extract_index(
         checkpoint_path.unlink()
     write_sync_progress(
         index_path,
-        provider_snapshot=provider_snapshot,
+        provider_snapshot=current_provider_snapshot(provider_snapshot, provider),
         total_candidate_frames=len(candidate_frames),
         completed_candidate_frames=len(decisions_by_frame_number),
         resumed_candidate_frames=len(existing_decisions),
@@ -3248,10 +3481,11 @@ def command_infer(args: argparse.Namespace) -> int:
     provider_selection = build_provider(provider_config)
     provider = provider_selection.provider
     logging.info(
-        "Using %s provider via %s (%s, %s).",
+        "Using %s provider via %s (%s, model=%s, %s).",
         provider_selection.provider_type,
         provider_selection.route,
         provider_selection.profile,
+        provider_selection.selected_model,
         provider_selection.execution_mode,
     )
     if args.extract_index:

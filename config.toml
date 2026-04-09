@@ -67,6 +67,7 @@ resize_for_llm = 1280
 
 [provider]
 routing = "auto"
+auto_order = ["local", "qwen", "gemini"]
 submission_mode = "auto"
 enabled = true
 temperature = 0.1
@@ -76,7 +77,7 @@ timeout_seconds = 120
 enabled = true
 supports_vision = true
 api_base = "http://127.0.0.1:11434"
-model = "qwen3-vl:8b"
+models = ["qwen3-vl:8b"]
 
 [provider.gemini]
 enabled = true
@@ -86,7 +87,7 @@ supports_async_batch = true
 prefer_async_batch = false
 min_request_interval_seconds = 0.0
 api_base = "https://generativelanguage.googleapis.com/v1beta/openai/"
-model = "gemini-3-flash-preview"
+models = ["gemini-3-flash-preview"]
 api_key = ""
 api_key_env = "GEMINI_API_KEY"
 image_transport = "base64"
@@ -98,7 +99,7 @@ enabled = true
 profile = "qwen3_vl_flash"
 supports_vision = true
 api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-model = "qwen3-vl-flash"
+models = ["qwen3-vl-flash"]
 api_key = ""
 api_key_env = "DASHSCOPE_API_KEY"
 image_transport = "base64"
@@ -107,18 +108,6 @@ json_output = false
 
 [provider.qwen.extra_body]
 enable_thinking = false
-
-[provider.openai_compatible]
-enabled = true
-profile = "deepseek_v3_2"
-supports_vision = false
-api_base = "https://api.deepseek.com"
-model = "deepseek-chat"
-api_key = ""
-api_key_env = "DEEPSEEK_API_KEY"
-image_transport = "base64"
-image_url_template = ""
-json_output = true
 
 [review]
 target_seconds = 30.0

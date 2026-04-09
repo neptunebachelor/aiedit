@@ -93,15 +93,15 @@ Goal:
 Supported provider types:
 
 - `ollama`
+- `qwen`
 - `gemini`
-- `openai_compatible`
 
 Primary inputs:
 
 - `--video`
 - `--extract-index`
 - `--provider`
-- `--provider-type`
+- `--provider-auto-order`
 - `--api-base`
 - `--api-key`
 - `--api-key-env`
@@ -114,9 +114,11 @@ Examples:
 python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 ```
 
-By default this prefers local Ollama, then Gemini 3 Flash, then Qwen, and finally a generic OpenAI-compatible API only if that provider is configured for vision support.
+By default this prefers local Ollama, then Qwen, and finally Gemini 3 Flash.
 
-For local development, the pipeline also loads a workspace `.env` file automatically. `GEMINI_BASE_URL` and `DEEPSEEK_BASE_URL` can override provider endpoints without editing TOML.
+You can change that fallback order in `[provider].auto_order` in `config.toml`, or override it per run with `--provider-auto-order` when using `--provider auto`. Each provider can also define fallback models with `provider.<name>.models`.
+
+For local development, the pipeline also loads a workspace `.env` file automatically. `GEMINI_BASE_URL` and `DASHSCOPE_BASE_URL` can override provider endpoints without editing TOML.
 
 ```bash
 python pipeline.py infer \
@@ -127,10 +129,8 @@ python pipeline.py infer \
 ```bash
 python pipeline.py infer \
   --video ./input/lap01.mp4 \
-  --provider api \
-  --api-base https://api.deepseek.com \
-  --model deepseek-chat \
-  --api-key-env DEEPSEEK_API_KEY
+  --provider qwen \
+  --model qwen3-vl-flash
 ```
 
 Async batch is opt-in. Submit a Gemini batch with:

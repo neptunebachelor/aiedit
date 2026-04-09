@@ -58,15 +58,29 @@ python pipeline.py extract --video ./input/lap01.mp4 --config ./config.track.tom
 python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 ```
 
-兼容 OpenAI 的第三方 provider：
+默认的 `infer` 回退顺序是：
+
+- 先本地 Ollama
+- 再 Qwen
+- 最后再 Gemini 3 Flash
+
+你可以在 `config.toml` 的 `[provider].auto_order` 里修改这个顺序，或者在使用 `--provider auto` 时用 `--provider-auto-order` 单次覆盖。每个 provider 也可以通过 `provider.<name>.models` 配置模型回退顺序。
+
+强制使用 Qwen：
 
 ```bash
 python pipeline.py infer \
   --video ./input/lap01.mp4 \
-  --provider-type openai_compatible \
-  --api-base https://your-api.example/v1 \
-  --model your-vision-model \
-  --api-key-env OPENAI_API_KEY
+  --provider qwen
+```
+
+强制使用指定的 Qwen 模型：
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider qwen \
+  --model qwen3-vl-flash
 ```
 
 ### 3. 审阅并生成预览
@@ -156,6 +170,8 @@ python pipeline.py render \
 - `sampling` 和 `extract`
 - `filters`
 - `ollama` 和 `provider`
+- `provider.routing`
+- `provider.auto_order`
 - `prompt`
 - `decision` 和 `selection`
 - `review`
@@ -165,7 +181,7 @@ python pipeline.py render \
 用户最常调整的参数包括：
 
 - 抽帧间隔或 sample FPS
-- provider 类型和模型名
+- provider 路由和模型回退顺序
 - API Base URL 和 API Key
 - 目标高光总时长
 - 单段片段时长限制
@@ -177,13 +193,13 @@ python pipeline.py render \
 `infer` 阶段会把已完成帧写入 `output/<video>/frame_decisions.checkpoint.jsonl`。同一个视频再次执行 `infer` 时会自动跳过已完成帧，只处理剩余帧，所以你可以中途换模型继续跑：
 
 ```bash
-python pipeline.py infer --video ./input/lap01.mp4 --provider api --model gpt-4.1-mini
+python pipeline.py infer --video ./input/lap01.mp4 --provider qwen --model qwen3-vl-flash
 ```
 
 如果你希望全部帧都用新模型重跑（不复用旧结果），请加 `--restart`：
 
 ```bash
-python pipeline.py infer --video ./input/lap01.mp4 --provider api --model gpt-4.1-mini --restart
+python pipeline.py infer --video ./input/lap01.mp4 --provider qwen --model qwen3-vl-flash --restart
 ```
 
 ## 输出文件

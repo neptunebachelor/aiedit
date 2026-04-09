@@ -81,9 +81,10 @@ python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 The default `infer` route is:
 
 - local Ollama first
-- Gemini 3 Flash next if local inference is unavailable and `GEMINI_API_KEY` is set
-- Qwen next if Gemini is unavailable and `DASHSCOPE_API_KEY` is set
-- generic OpenAI-compatible API last if it is explicitly configured for vision support
+- Qwen next if local inference is unavailable and `DASHSCOPE_API_KEY` is set
+- Gemini 3 Flash next if Qwen is unavailable and `GEMINI_API_KEY` is set
+
+You can change that fallback order in `[provider].auto_order` in `config.toml`, or override it per run with `--provider-auto-order` when using `--provider auto`. Each provider can also define ordered fallback models via `provider.<name>.models`.
 
 Force Gemini:
 
@@ -93,23 +94,21 @@ python pipeline.py infer \
   --provider gemini
 ```
 
-Force the generic API route:
+Force Qwen:
 
 ```bash
 python pipeline.py infer \
   --video ./input/lap01.mp4 \
-  --provider api
+  --provider qwen
 ```
 
-Force a specific OpenAI-compatible API model:
+Force a specific Qwen model:
 
 ```bash
 python pipeline.py infer \
   --video ./input/lap01.mp4 \
-  --provider api \
-  --api-base https://api.deepseek.com \
-  --model deepseek-chat \
-  --api-key-env DEEPSEEK_API_KEY
+  --provider qwen \
+  --model qwen3-vl-flash
 ```
 
 Opt into Gemini async batch submission:
@@ -253,9 +252,10 @@ The config now supports both the original legacy sections and the new pipeline s
 - `filters`
 - `ollama` and `provider`
 - `provider.routing`
+- `provider.auto_order`
 - `provider.ollama`
 - `provider.gemini`
-- `provider.openai_compatible`
+- `provider.qwen`
 - `prompt`
 - `decision` and `selection`
 - `review`
@@ -265,7 +265,7 @@ The config now supports both the original legacy sections and the new pipeline s
 Key user-facing knobs:
 
 - frame interval or sample FPS
-- provider routing and model
+- provider routing and fallback models
 - API base URL and API key
 - target highlight duration
 - clip length limits
