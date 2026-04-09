@@ -2065,10 +2065,18 @@ def build_single_continuous_highlight_proposals(
                 }
             )
     else:
-        ranked_segments = sorted(normalized, key=lambda segment: float(segment.get("score", 0.0)), reverse=True)
-        for segment in ranked_segments[: max(1, int(candidate_pool_size))]:
-            source_start_hint = float(segment["start_seconds"])
-            source_end_hint = float(segment["end_seconds"])
+        ranked_segments = sorted(
+            zip(normalized, raw_segments, strict=False),
+            key=lambda item: float(item[0].get("score", 0.0)),
+            reverse=True,
+        )
+        for segment, raw_segment in ranked_segments[: max(1, int(candidate_pool_size))]:
+            if "source_start_seconds" in raw_segment and "source_end_seconds" in raw_segment:
+                source_start_hint = float(raw_segment["source_start_seconds"])
+                source_end_hint = float(raw_segment["source_end_seconds"])
+            else:
+                source_start_hint = float(segment["start_seconds"])
+                source_end_hint = float(segment["end_seconds"])
             center = (source_start_hint + source_end_hint) / 2.0
             video_duration = float(payload["video"].get("duration_seconds", source_end_hint + target_seconds))
             source_start = max(0.0, center - (target_seconds / 2.0))
