@@ -8,6 +8,8 @@ import io
 import json
 import logging
 import os
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -760,6 +762,7 @@ def parse_args() -> argparse.Namespace:
     extract_parser.add_argument("--max-frames", type=int, help="Limit the number of sampled frames.")
     extract_parser.add_argument("--jpeg-quality", type=int, help="JPEG quality used when writing extracted frames.")
     extract_parser.add_argument("--resize-for-llm", type=int, help="Maximum output dimension for extracted frames.")
+    extract_parser.add_argument("--ffmpeg", help="Optional path to ffmpeg executable.")
     extract_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     infer_parser = subparsers.add_parser("infer", help="Run vision-model inference over extracted frames.")
@@ -775,6 +778,7 @@ def parse_args() -> argparse.Namespace:
     infer_parser.add_argument("--api-key", help="API key for third-party providers.")
     infer_parser.add_argument("--api-key-env", help="Environment variable used to read the API key.")
     infer_parser.add_argument("--model", help="Vision model name.")
+    infer_parser.add_argument("--ffmpeg", help="Optional path to ffmpeg executable used if extract runs implicitly.")
     infer_parser.add_argument("--temperature", type=float, help="Sampling temperature for the provider.")
     infer_parser.add_argument("--timeout-seconds", type=float, help="Provider timeout in seconds.")
     infer_parser.add_argument(
@@ -1220,6 +1224,18 @@ def resize_frame(frame: Any, max_dimension: int) -> Any:
     return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
 
 
+def resolve_resize_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
+    if max_dimension <= 0:
+        return width, height
+    longest = max(width, height)
+    if longest <= max_dimension:
+        return width, height
+    scale = max_dimension / float(longest)
+    target_width = max(2, int(round(width * scale)))
+    target_height = max(2, int(round(height * scale)))
+    return target_width, target_height
+
+
 def write_frame_image(frame: Any, destination: Path, jpeg_quality: int) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
@@ -1232,6 +1248,62 @@ def frame_filename(timestamp_seconds: float) -> str:
     return f"{timestamp_seconds:09.3f}.jpg".replace(".", "_", 1)
 
 
+def write_srt_file(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8-sig")
+
+
+def sample_frame_numbers(video_meta: VideoMeta, frame_interval_seconds: float, max_frames: int) -> tuple[int, list[int]]:
+    frame_step = max(1, int(round(video_meta.fps * frame_interval_seconds)))
+    sample_indices = list(range(0, max(video_meta.frame_count, 1), frame_step))
+    if max_frames > 0:
+        sample_indices = sample_indices[:max_frames]
+    return frame_step, sample_indices
+
+
+def extract_sample_frames_with_ffmpeg(
+    *,
+    ffmpeg_path: str,
+    video_path: Path,
+    output_dir: Path,
+    frame_step: int,
+    output_count: int,
+    video_meta: VideoMeta,
+    resize_for_llm: int,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if output_count <= 0:
+        return []
+
+    filter_parts = [f"select='not(mod(n\\,{frame_step}))'"]
+    target_width, target_height = resolve_resize_dimensions(video_meta.width, video_meta.height, resize_for_llm)
+    if (target_width, target_height) != (video_meta.width, video_meta.height):
+        filter_parts.append(f"scale={target_width}:{target_height}:flags=lanczos")
+
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(video_path),
+        "-vf",
+        ",".join(filter_parts),
+        "-vsync",
+        "vfr",
+        "-q:v",
+        "2",
+        "-frames:v",
+        str(output_count),
+        str(output_dir / "%06d.jpg"),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip() or "unknown ffmpeg error"
+        raise RuntimeError(f"ffmpeg sample extraction failed: {stderr}")
+    return sorted(output_dir.glob("*.jpg"))
+
+
 def extract_candidates_for_video(
     video_path: Path,
     *,
@@ -1241,21 +1313,14 @@ def extract_candidates_for_video(
     max_frames: int,
     jpeg_quality: int,
     resize_for_llm: int,
+    ffmpeg_override: str | None = None,
 ) -> Path:
     video_meta = probe_video(video_path)
     video_output_dir = output_root / video_path.stem
     extract_dir = video_output_dir / "extract"
     frames_dir = extract_dir / "frames"
     extract_dir.mkdir(parents=True, exist_ok=True)
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open video: {video_path}")
-
-    frame_step = max(1, int(round(video_meta.fps * frame_interval_seconds)))
-    sample_indices = list(range(0, max(video_meta.frame_count, 1), frame_step))
-    if max_frames > 0:
-        sample_indices = sample_indices[:max_frames]
+    frame_step, sample_indices = sample_frame_numbers(video_meta, frame_interval_seconds, max_frames)
 
     gate_config = {
         "filters": config["filters"],
@@ -1268,13 +1333,35 @@ def extract_candidates_for_video(
     previous_frame: Any | None = None
     previous_hash: Any | None = None
     last_forced_timestamp: float | None = None
+    extract_backend = "ffmpeg"
 
-    progress = tqdm(sample_indices, desc=f"extract:{video_path.name}", unit="frame")
     try:
-        for frame_number in progress:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-            ok, frame = cap.read()
-            if not ok:
+        ffmpeg_path = find_ffmpeg(ffmpeg_override)
+        logging.info("Extracting sampled frames via ffmpeg for %s", video_path.name)
+        temp_dir = extract_dir / "_ffmpeg_samples"
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_files = extract_sample_frames_with_ffmpeg(
+            ffmpeg_path=ffmpeg_path,
+            video_path=video_path,
+            output_dir=temp_dir,
+            frame_step=frame_step,
+            output_count=len(sample_indices),
+            video_meta=video_meta,
+            resize_for_llm=resize_for_llm,
+        )
+        if len(temp_files) != len(sample_indices):
+            logging.warning(
+                "ffmpeg extracted %s sampled frames for %s, expected %s.",
+                len(temp_files),
+                video_path.name,
+                len(sample_indices),
+            )
+        paired_samples = list(zip(sample_indices, temp_files))
+        progress = tqdm(paired_samples, desc=f"extract:{video_path.name}", unit="frame")
+        for frame_number, temp_image_path in progress:
+            frame = cv2.imread(str(temp_image_path))
+            if frame is None:
+                logging.warning("Skipping unreadable sampled frame %s", temp_image_path)
                 continue
 
             timestamp_seconds = frame_number / video_meta.fps if video_meta.fps > 0 else 0.0
@@ -1296,18 +1383,70 @@ def extract_candidates_for_video(
 
             if candidate:
                 last_forced_timestamp = timestamp_seconds
-                prepared_frame = resize_frame(frame, resize_for_llm)
                 image_path = frames_dir / frame_filename(timestamp_seconds)
-                write_frame_image(prepared_frame, image_path, jpeg_quality)
+                write_frame_image(frame, image_path, jpeg_quality)
                 record["image_path"] = str(image_path.resolve())
-                record["image_width"] = int(prepared_frame.shape[1])
-                record["image_height"] = int(prepared_frame.shape[0])
+                record["image_width"] = int(frame.shape[1])
+                record["image_height"] = int(frame.shape[0])
 
             records.append(record)
             previous_frame = frame
             previous_hash = current_hash
-    finally:
-        cap.release()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        extract_backend = "opencv_seek_fallback"
+        shutil.rmtree(extract_dir / "_ffmpeg_samples", ignore_errors=True)
+        logging.warning(
+            "ffmpeg-backed extract failed for %s (%s); falling back to OpenCV seek extraction.",
+            video_path.name,
+            exc,
+        )
+        records = []
+        previous_frame = None
+        previous_hash = None
+        last_forced_timestamp = None
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open video: {video_path}")
+        try:
+            progress = tqdm(sample_indices, desc=f"extract:{video_path.name}", unit="frame")
+            for frame_number in progress:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+
+                timestamp_seconds = frame_number / video_meta.fps if video_meta.fps > 0 else 0.0
+                metrics, current_hash = compute_metrics(frame, previous_frame, previous_hash)
+                candidate = should_send_to_model(metrics, timestamp_seconds, last_forced_timestamp, gate_config)
+
+                record = {
+                    "timestamp_seconds": round(timestamp_seconds, 3),
+                    "timestamp_srt": format_timestamp(timestamp_seconds),
+                    "frame_number": frame_number,
+                    "candidate": candidate,
+                    "blur_score": round(metrics.blur_score, 3),
+                    "frame_diff": round(metrics.frame_diff, 3),
+                    "hash_distance": int(metrics.hash_distance),
+                    "image_path": "",
+                    "image_width": 0,
+                    "image_height": 0,
+                }
+
+                if candidate:
+                    last_forced_timestamp = timestamp_seconds
+                    prepared_frame = resize_frame(frame, resize_for_llm)
+                    image_path = frames_dir / frame_filename(timestamp_seconds)
+                    write_frame_image(prepared_frame, image_path, jpeg_quality)
+                    record["image_path"] = str(image_path.resolve())
+                    record["image_width"] = int(prepared_frame.shape[1])
+                    record["image_height"] = int(prepared_frame.shape[0])
+
+                records.append(record)
+                previous_frame = frame
+                previous_hash = current_hash
+        finally:
+            cap.release()
 
     payload = {
         "stage": "extract",
@@ -1315,6 +1454,7 @@ def extract_candidates_for_video(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "config_snapshot": {
             "extract": {
+                "backend": extract_backend,
                 "frame_interval_seconds": round(frame_interval_seconds, 3),
                 "sample_fps": round(1.0 / frame_interval_seconds, 3),
                 "forced_keep_interval_seconds": float(config["extract"]["forced_keep_interval_seconds"]),
@@ -1716,6 +1856,7 @@ def ensure_extract_index(args: argparse.Namespace, config: dict[str, Any]) -> Pa
         max_frames=int(extract_settings["max_frames"]),
         jpeg_quality=int(extract_settings["jpeg_quality"]),
         resize_for_llm=int(extract_settings["resize_for_llm"]),
+        ffmpeg_override=getattr(args, "ffmpeg", None),
     )
 
 
@@ -2890,11 +3031,8 @@ def write_review_outputs(
 
     review_json_path.write_text(json.dumps(review_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     editable_json_path.write_text(json.dumps(editable_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    final_srt_path.write_text(build_srt_text(segments), encoding="utf-8")
-    source_srt_path.write_text(
-        build_srt_text(segments, start_key="source_start_seconds", end_key="source_end_seconds"),
-        encoding="utf-8",
-    )
+    write_srt_file(final_srt_path, build_srt_text(segments))
+    write_srt_file(source_srt_path, build_srt_text(segments, start_key="source_start_seconds", end_key="source_end_seconds"))
 
     return {
         "review_json": review_json_path,
@@ -2902,6 +3040,43 @@ def write_review_outputs(
         "final_srt": final_srt_path,
         "source_srt": source_srt_path,
     }
+
+
+def build_preview_subtitle_segments(
+    segments: list[dict[str, Any]],
+    *,
+    default_duration_seconds: float = 5.0,
+) -> list[dict[str, Any]]:
+    preview_segments: list[dict[str, Any]] = []
+    default_duration = max(0.5, float(default_duration_seconds))
+    for segment in segments:
+        start_seconds = float(segment.get("start_seconds", 0.0) or 0.0)
+        end_seconds = float(segment.get("end_seconds", start_seconds) or start_seconds)
+        if end_seconds <= start_seconds:
+            continue
+
+        cue_start = start_seconds
+        cue_end = min(end_seconds, start_seconds + default_duration)
+
+        anchor = segment.get("anchor_seconds")
+        source_start = segment.get("source_start_seconds")
+        source_end = segment.get("source_end_seconds")
+        if anchor is not None and source_start is not None and source_end is not None:
+            source_start_seconds = float(source_start)
+            source_end_seconds = float(source_end)
+            if source_end_seconds > source_start_seconds:
+                anchor_offset = float(anchor) - source_start_seconds
+                anchor_offset = max(0.0, min(anchor_offset, source_end_seconds - source_start_seconds))
+                cue_start = min(end_seconds, max(start_seconds, start_seconds + anchor_offset))
+                cue_end = min(end_seconds, cue_start + default_duration)
+        if cue_end <= cue_start:
+            continue
+
+        preview_segment = dict(segment)
+        preview_segment["start_seconds"] = round(cue_start, 3)
+        preview_segment["end_seconds"] = round(cue_end, 3)
+        preview_segments.append(preview_segment)
+    return preview_segments
 
 
 def render_preview_if_requested(
@@ -2913,9 +3088,9 @@ def render_preview_if_requested(
     output_dir: Path,
     stem: str,
     segments: list[dict[str, Any]],
-) -> Path | None:
+) -> tuple[Path | None, Path | None]:
     if not requested:
-        return None
+        return None, None
     source_path_text = str(payload["video"].get("source_path", "")).strip()
     if not source_path_text:
         raise ValueError("Preview rendering requires a source video path.")
@@ -2924,6 +3099,9 @@ def render_preview_if_requested(
     preview_height = parse_resolution(str(preview_settings["resolution"]), video_meta.height)
     ffmpeg_path = find_ffmpeg(ffmpeg_override)
     preview_path = output_dir / f"{stem}.preview.mp4"
+    preview_srt_path = output_dir / f"{stem}.preview.srt"
+    preview_subtitle_segments = build_preview_subtitle_segments(segments)
+    write_srt_file(preview_srt_path, build_srt_text(preview_subtitle_segments))
     render_video(
         ffmpeg_path=ffmpeg_path,
         source_video=source_path,
@@ -2933,7 +3111,7 @@ def render_preview_if_requested(
         crf=int(preview_settings["crf"]),
         scale_height=preview_height,
     )
-    return preview_path
+    return preview_path, preview_srt_path
 
 
 def infer_render_stem(input_path: Path, target_seconds: float | None) -> str:
@@ -2984,11 +3162,8 @@ def write_render_outputs(
     source_srt_path = output_dir / f"{stem}.source.srt"
 
     json_path.write_text(json.dumps(output_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    final_srt_path.write_text(build_srt_text(segments), encoding="utf-8")
-    source_srt_path.write_text(
-        build_srt_text(segments, start_key="source_start_seconds", end_key="source_end_seconds"),
-        encoding="utf-8",
-    )
+    write_srt_file(final_srt_path, build_srt_text(segments))
+    write_srt_file(source_srt_path, build_srt_text(segments, start_key="source_start_seconds", end_key="source_end_seconds"))
     return json_path, final_srt_path, source_srt_path
 
 
@@ -3060,6 +3235,7 @@ def command_extract(args: argparse.Namespace) -> int:
             max_frames=int(extract_settings["max_frames"]),
             jpeg_quality=int(extract_settings["jpeg_quality"]),
             resize_for_llm=int(extract_settings["resize_for_llm"]),
+            ffmpeg_override=getattr(args, "ffmpeg", None),
         )
     return 0
 
@@ -3197,7 +3373,7 @@ def command_review(args: argparse.Namespace) -> int:
             review_settings=review_settings,
             segments=variant_segments,
         )
-        preview_path = render_preview_if_requested(
+        preview_path, preview_srt_path = render_preview_if_requested(
             requested=bool(args.preview or preview_settings.get("enabled", False)),
             preview_settings=preview_settings,
             ffmpeg_override=args.ffmpeg,
@@ -3209,11 +3385,15 @@ def command_review(args: argparse.Namespace) -> int:
         manifest_entry = {"index": variant_index, "stem": current_stem, **{key: str(path) for key, path in outputs.items()}}
         if preview_path:
             manifest_entry["preview"] = str(preview_path)
+        if preview_srt_path:
+            manifest_entry["preview_srt"] = str(preview_srt_path)
         manifest_variants.append(manifest_entry)
         for path in outputs.values():
             logging.info("Wrote %s", path)
         if preview_path:
             logging.info("Wrote %s", preview_path)
+        if preview_srt_path:
+            logging.info("Wrote %s", preview_srt_path)
     if total_variants > 1:
         manifest_path = output_dir / f"{stem}.review.index.json"
         manifest_payload = {
