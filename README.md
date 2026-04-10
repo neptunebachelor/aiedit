@@ -56,6 +56,8 @@ GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
 
 ## Quick Start
 
+By default, per-video artifacts are written beside the source video in a sibling folder named after the video stem, for example `./input/lap01/`. Use `--output-root` if you want to override that.
+
 ### 1. Extract frames
 
 Road riding:
@@ -125,14 +127,14 @@ Then collect the completed batch into `analysis.json`:
 
 ```bash
 python pipeline.py collect \
-  --manifest ./output/lap01/analysis.batch.json
+  --manifest ./input/lap01/analysis.batch.json
 ```
 
 ### 3. Temporal analysis (recommended)
 
 ```bash
 python pipeline.py temporal \
-  --input ./output/lap01/analysis.json \
+  --input ./input/lap01/analysis.json \
   --top-k 5 \
   --window-seconds 3 \
   --window-stride 1.5 \
@@ -142,7 +144,7 @@ python pipeline.py temporal \
 This writes:
 
 ```text
-output/lap01/
+input/lap01/
 |-- candidate_segments.json
 |-- temporal_windows.json
 |-- highlight.final.json
@@ -165,7 +167,7 @@ python pipeline.py run \
 
 ```bash
 python pipeline.py review \
-  --input ./output/lap01/analysis.json \
+  --input ./input/lap01/analysis.json \
   --target-seconds 30 \
   --caption-mode human \
   --preview \
@@ -175,7 +177,7 @@ python pipeline.py review \
 This writes:
 
 ```text
-output/lap01/
+input/lap01/
 |-- highlights_30s.review.json
 |-- highlights_30s.editable.json
 |-- highlights_30s.final.srt
@@ -196,7 +198,7 @@ Change a source cut:
 
 ```bash
 python pipeline.py edit update-segment \
-  --plan ./output/lap01/highlights_30s.editable.json \
+  --plan ./input/lap01/highlights_30s.editable.json \
   --rank 3 \
   --source-start-seconds 150.2 \
   --source-end-seconds 153.2
@@ -206,7 +208,7 @@ Change subtitle text:
 
 ```bash
 python pipeline.py edit update-caption \
-  --plan ./output/lap01/highlights_30s.editable.json \
+  --plan ./input/lap01/highlights_30s.editable.json \
   --rank 3 \
   --caption "Handlebar wobble starts here." \
   --caption-detail "Close to the tyre wall."
@@ -216,7 +218,7 @@ python pipeline.py edit update-caption \
 
 ```bash
 python pipeline.py render \
-  --input ./output/lap01/highlights_30s.editable.json \
+  --input ./input/lap01/highlights_30s.editable.json \
   --stem lap01_final \
   --resolution source
 ```
@@ -225,7 +227,7 @@ Or render a lower-resolution deliverable:
 
 ```bash
 python pipeline.py render \
-  --input ./output/lap01/highlights_30s.editable.json \
+  --input ./input/lap01/highlights_30s.editable.json \
   --stem lap01_final_720p \
   --resolution 720p
 ```
@@ -277,7 +279,7 @@ Key user-facing knobs:
 Typical stage outputs look like this:
 
 ```text
-output/lap01/
+input/lap01/
 |-- extract/
 |   |-- frames/
 |   `-- index.json

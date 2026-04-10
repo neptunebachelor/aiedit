@@ -69,7 +69,7 @@ python pipeline.py extract --video ./input/lap01.mp4 --config ./config.track.tom
 Outputs:
 
 ```text
-output/<video_stem>/
+<source_video_dir>/<video_stem>/
 `-- extract/
     |-- frames/
     `-- index.json
@@ -146,13 +146,13 @@ Then collect it later:
 
 ```bash
 python pipeline.py collect \
-  --manifest ./output/lap01/analysis.batch.json
+  --manifest ./input/lap01/analysis.batch.json
 ```
 
 Outputs:
 
 ```text
-output/<video_stem>/
+<source_video_dir>/<video_stem>/
 |-- analysis.json
 |-- frame_decisions.jsonl
 |-- segments.raw.json
@@ -178,7 +178,7 @@ Example:
 
 ```bash
 python pipeline.py temporal \
-  --input ./output/lap01/analysis.json \
+  --input ./input/lap01/analysis.json \
   --top-k 5 \
   --window-seconds 3 \
   --window-stride 1.5 \
@@ -189,7 +189,7 @@ python pipeline.py temporal \
 Outputs:
 
 ```text
-output/<video_stem>/
+<source_video_dir>/<video_stem>/
 |-- candidate_segments.json
 |-- temporal_windows.json
 |-- highlight.final.json
@@ -230,7 +230,7 @@ Example:
 
 ```bash
 python pipeline.py review \
-  --input ./output/lap01/analysis.json \
+  --input ./input/lap01/analysis.json \
   --target-seconds 30 \
   --caption-mode human \
   --preview \
@@ -240,7 +240,7 @@ python pipeline.py review \
 Outputs:
 
 ```text
-output/<video_stem>/
+<source_video_dir>/<video_stem>/
 |-- highlights_30s.review.json
 |-- highlights_30s.editable.json
 |-- highlights_30s.final.srt
@@ -279,14 +279,14 @@ Examples:
 
 ```bash
 python pipeline.py render \
-  --input ./output/lap01/highlights_30s.editable.json \
+  --input ./input/lap01/highlights_30s.editable.json \
   --stem lap01_final \
   --resolution source
 ```
 
 ```bash
 python pipeline.py render \
-  --input ./output/lap01/highlights_30s.editable.json \
+  --input ./input/lap01/highlights_30s.editable.json \
   --stem lap01_final_720p \
   --resolution 720p
 ```
@@ -294,7 +294,7 @@ python pipeline.py render \
 Outputs:
 
 ```text
-output/<video_stem>/
+<source_video_dir>/<video_stem>/
 |-- lap01_final.json
 |-- lap01_final.final.srt
 |-- lap01_final.source.srt
@@ -317,7 +317,7 @@ Update segment timing:
 
 ```bash
 python pipeline.py edit update-segment \
-  --plan ./output/lap01/highlights_30s.editable.json \
+  --plan ./input/lap01/highlights_30s.editable.json \
   --rank 3 \
   --source-start-seconds 150.2 \
   --source-end-seconds 153.2
@@ -327,7 +327,7 @@ Update caption text:
 
 ```bash
 python pipeline.py edit update-caption \
-  --plan ./output/lap01/highlights_30s.editable.json \
+  --plan ./input/lap01/highlights_30s.editable.json \
   --rank 3 \
   --caption "Handlebar wobble starts here." \
   --caption-detail "Close to the tyre wall."

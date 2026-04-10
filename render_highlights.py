@@ -115,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        help="Directory where refined JSON/SRT/video files will be written.",
+        help="Directory where refined JSON/SRT/video files will be written. Defaults to the source video's artifact directory.",
     )
     parser.add_argument(
         "--stem",
@@ -204,6 +204,16 @@ def load_payload(input_path: Path, source_override: str | None) -> dict[str, Any
         }
 
     raise ValueError(f"Unsupported input type: {input_path.suffix}")
+
+
+def resolve_output_dir(input_path: Path, payload: dict[str, Any], output_override: str | None) -> Path:
+    if output_override:
+        return Path(output_override).expanduser().resolve()
+    source_path_text = str(payload.get("video", {}).get("source_path", "")).strip()
+    if source_path_text:
+        source_path = Path(source_path_text).expanduser().resolve()
+        return source_path.parent / source_path.stem
+    return input_path.parent
 
 
 def normalize_segment(segment: dict[str, Any], index: int) -> dict[str, Any]:
@@ -640,7 +650,7 @@ def main() -> int:
     input_path = Path(args.input).expanduser().resolve()
     payload = load_payload(input_path, args.source_video)
 
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
+    output_dir = resolve_output_dir(input_path, payload, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     raw_segments = list(payload["segments"])

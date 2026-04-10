@@ -801,7 +801,7 @@ def parse_args() -> argparse.Namespace:
 
     review_parser = subparsers.add_parser("review", help="Build a reviewable edit plan and optional preview.")
     review_parser.add_argument("--input", required=True, help="Path to analysis.json, segments.raw.json, or editable JSON.")
-    review_parser.add_argument("--output-dir", help="Destination directory for review outputs.")
+    review_parser.add_argument("--output-dir", help="Destination directory for review outputs. Defaults to the input JSON directory.")
     review_parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
     review_parser.add_argument("--target-seconds", type=float, help="Target total duration for the compact plan.")
     review_parser.add_argument(
@@ -837,7 +837,7 @@ def parse_args() -> argparse.Namespace:
 
     render_parser = subparsers.add_parser("render", help="Render a final video from a reviewed plan or raw analysis.")
     render_parser.add_argument("--input", required=True, help="Path to review JSON, editable JSON, or analysis.json.")
-    render_parser.add_argument("--output-dir", help="Destination directory for rendered outputs.")
+    render_parser.add_argument("--output-dir", help="Destination directory for rendered outputs. Defaults to the input JSON directory.")
     render_parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
     render_parser.add_argument("--target-seconds", type=float, help="Target duration when rendering from raw analysis.")
     render_parser.add_argument(
@@ -974,7 +974,7 @@ def parse_args() -> argparse.Namespace:
         help="Build temporal candidate/window analysis artifacts and a refined 30s highlight proposal.",
     )
     temporal_parser.add_argument("--input", required=True, help="Path to analysis.json.")
-    temporal_parser.add_argument("--output-dir", help="Destination directory for temporal artifacts.")
+    temporal_parser.add_argument("--output-dir", help="Destination directory for temporal artifacts. Defaults to the input JSON directory.")
     temporal_parser.add_argument("--top-k", type=int, default=5, help="Top coarse candidate segments to analyze.")
     temporal_parser.add_argument("--window-seconds", type=float, default=3.0, help="Temporal window size in seconds.")
     temporal_parser.add_argument("--window-stride", type=float, default=1.5, help="Sliding-window stride in seconds.")
@@ -998,7 +998,7 @@ def parse_args() -> argparse.Namespace:
 
 def add_common_video_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--video", required=True, help="Video file or folder.")
-    parser.add_argument("--output-root", help="Root directory for pipeline outputs.")
+    parser.add_argument("--output-root", help="Root directory for pipeline outputs. Defaults to each source video's parent directory.")
     parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
 
 
@@ -1186,6 +1186,21 @@ def resolve_output_root(config: dict[str, Any], override: str | None, video_path
 def resolve_video_output_dir(config: dict[str, Any], override: str | None, video_path: Path) -> Path:
     output_root = resolve_output_root(config, override, video_path)
     return output_root / video_path.stem
+
+
+def resolve_stage_output_dir(
+    input_path: Path,
+    output_override: str | None,
+    payload: dict[str, Any] | None = None,
+) -> Path:
+    if output_override:
+        return Path(output_override).expanduser().resolve()
+    if payload:
+        source_path_text = str(payload.get("video", {}).get("source_path", "")).strip()
+        if source_path_text:
+            source_path = Path(source_path_text).expanduser().resolve()
+            return source_path.parent / source_path.stem
+    return input_path.parent
 
 
 def probe_video(video_path: Path) -> VideoMeta:
@@ -2427,7 +2442,7 @@ def command_temporal(args: argparse.Namespace) -> int:
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     if "frames" not in payload or "segments" not in payload:
         raise ValueError(f"{input_path} must be an infer analysis.json containing frames and segments.")
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
+    output_dir = resolve_stage_output_dir(input_path, getattr(args, "output_dir", None), payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     records = list(payload["frames"])
     segments = list(payload["segments"])
@@ -3358,7 +3373,7 @@ def command_review(args: argparse.Namespace) -> int:
     payload = load_payload(input_path, None)
     review_settings = resolve_review_settings(config, args)
     stem = args.stem or default_stem(float(review_settings["target_seconds"]))
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
+    output_dir = resolve_stage_output_dir(input_path, getattr(args, "output_dir", None), payload)
     preview_settings = copy.deepcopy(config["preview"])
     if args.preview_resolution:
         preview_settings["resolution"] = args.preview_resolution
@@ -3420,7 +3435,7 @@ def command_render(args: argparse.Namespace) -> int:
     config = load_pipeline_config(Path(args.config).expanduser())
     input_path = Path(args.input).expanduser().resolve()
     payload = load_payload(input_path, None)
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
+    output_dir = resolve_stage_output_dir(input_path, getattr(args, "output_dir", None), payload)
 
     review_settings = resolve_review_settings(config, args)
     if args.caption_mode:
@@ -3504,9 +3519,15 @@ def command_run(args: argparse.Namespace) -> int:
 
         command_extract(video_args)
         command_infer(video_args)
+        index_path = (
+            Path(video_args.extract_index).expanduser().resolve()
+            if getattr(video_args, "extract_index", None)
+            else ensure_extract_index(video_args, config)
+        )
+        stage_output_dir = index_path.parent.parent
         temporal_args = argparse.Namespace(
-            input=str(video_output_dir / "analysis.json"),
-            output_dir=str(video_output_dir),
+            input=str(stage_output_dir / "analysis.json"),
+            output_dir=str(stage_output_dir),
             top_k=5,
             window_seconds=3.0,
             window_stride=1.5,
@@ -3518,12 +3539,12 @@ def command_run(args: argparse.Namespace) -> int:
         command_temporal(temporal_args)
 
         if bool(getattr(args, "skip_review", False)):
-            render_input = video_output_dir / "analysis.json"
-            command_render(argparse.Namespace(**vars(video_args), input=str(render_input), output_dir=str(video_output_dir)))
+            render_input = stage_output_dir / "analysis.json"
+            command_render(argparse.Namespace(**vars(video_args), input=str(render_input), output_dir=str(stage_output_dir)))
         else:
             review_args = argparse.Namespace(**vars(video_args))
-            review_args.input = str(video_output_dir / "analysis.json")
-            review_args.output_dir = str(video_output_dir)
+            review_args.input = str(stage_output_dir / "analysis.json")
+            review_args.output_dir = str(stage_output_dir)
             review_settings = resolve_review_settings(config, review_args)
             review_stem = review_args.stem or default_stem(float(review_settings["target_seconds"]))
             variants = build_review_variants(load_payload(Path(review_args.input), None), review_settings)
@@ -3534,7 +3555,7 @@ def command_run(args: argparse.Namespace) -> int:
                 outputs = write_review_outputs(
                     payload=load_payload(Path(review_args.input), None),
                     input_path=Path(review_args.input),
-                    output_dir=video_output_dir,
+                    output_dir=stage_output_dir,
                     stem=current_stem,
                     review_settings=review_settings,
                     segments=list(variant["segments"]),
@@ -3543,7 +3564,7 @@ def command_run(args: argparse.Namespace) -> int:
                     logging.info("Wrote %s", path)
                 render_args = argparse.Namespace(**vars(video_args))
                 render_args.input = str(outputs["editable_json"])
-                render_args.output_dir = str(video_output_dir)
+                render_args.output_dir = str(stage_output_dir)
                 render_args.stem = current_stem
                 command_render(render_args)
     return 0
