@@ -104,6 +104,8 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
             "enabled": True,
             "profile": "qwen3_vl_flash",
             "supports_vision": True,
+            "supports_async_batch": True,
+            "prefer_async_batch": False,
             "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "model": "qwen3-vl-flash",
             "api_key": "",
@@ -327,7 +329,7 @@ def json_compatible(value: Any) -> Any:
 
 def normalize_batch_state(state: Any) -> str:
     text = str(getattr(state, "value", state) or "").strip()
-    return text or "JOB_STATE_UNSPECIFIED"
+    return text or "unknown"
 
 
 def is_terminal_batch_state(state: Any) -> bool:
@@ -336,6 +338,10 @@ def is_terminal_batch_state(state: Any) -> bool:
         "JOB_STATE_FAILED",
         "JOB_STATE_CANCELLED",
         "JOB_STATE_PAUSED",
+        "completed",
+        "failed",
+        "expired",
+        "cancelled",
     }
 
 
@@ -445,25 +451,26 @@ class OpenAICompatibleVisionProvider:
             raise ValueError(f"Unsupported image transport: {self.image_transport}")
         return {"type": "image_url", "image_url": {"url": build_data_url(image_bytes)}}
 
-    def infer(
+    def build_chat_payload(
         self,
         image_bytes: bytes,
         *,
         image_path: Path | None,
         timestamp_seconds: float,
-        config: dict[str, Any],
+        prompt_config: dict[str, Any],
+        inline_extra_body: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": build_system_prompt(config),
+                    "content": build_system_prompt(prompt_config),
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": build_user_prompt(config, timestamp_seconds)},
+                        {"type": "text", "text": build_user_prompt(prompt_config, timestamp_seconds)},
                         self.build_image_part(image_bytes, image_path),
                     ],
                 },
@@ -474,10 +481,216 @@ class OpenAICompatibleVisionProvider:
         if self.json_output:
             payload["response_format"] = {"type": "json_object"}
         if self.extra_body:
-            payload["extra_body"] = copy.deepcopy(self.extra_body)
+            extra_body = copy.deepcopy(self.extra_body)
+            if inline_extra_body:
+                payload.update(extra_body)
+            else:
+                payload["extra_body"] = extra_body
+        return payload
+
+    def infer(
+        self,
+        image_bytes: bytes,
+        *,
+        image_path: Path | None,
+        timestamp_seconds: float,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = self.build_chat_payload(
+            image_bytes,
+            image_path=image_path,
+            timestamp_seconds=timestamp_seconds,
+            prompt_config=config,
+        )
         response = self.client.chat.completions.create(**payload)
         message_content = extract_message_text(response.choices[0].message.content)
         return extract_json_block(message_content)
+
+
+class OpenAICompatibleBatchVisionProvider(OpenAICompatibleVisionProvider):
+    def __init__(self, *, route_name: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.route_name = route_name
+
+    def _build_request_record(self, frame: dict[str, Any], *, prompt_snapshot: dict[str, Any]) -> dict[str, Any]:
+        image_path = Path(str(frame["image_path"])).expanduser().resolve()
+        image_bytes = image_path.read_bytes()
+        request = self.build_chat_payload(
+            image_bytes,
+            image_path=image_path,
+            timestamp_seconds=float(frame["timestamp_seconds"]),
+            prompt_config={"prompt": prompt_snapshot},
+            inline_extra_body=True,
+        )
+        return {
+            "custom_id": build_batch_request_key(int(frame["frame_number"])),
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": request,
+        }
+
+    @staticmethod
+    def _read_file_content_text(content: Any) -> str:
+        text = getattr(content, "text", None)
+        if isinstance(text, str):
+            return text
+        if callable(text):
+            text_value = text()
+            if isinstance(text_value, str):
+                return text_value
+
+        raw: Any
+        if isinstance(content, (bytes, bytearray)):
+            raw = bytes(content)
+        elif hasattr(content, "read"):
+            raw = content.read()
+        else:
+            raw = getattr(content, "content", None)
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, (bytes, bytearray)):
+            return bytes(raw).decode("utf-8")
+        raise RuntimeError(f"Unsupported batch file content payload: {type(content).__name__}")
+
+    def submit_batch(
+        self,
+        *,
+        index_path: Path,
+        provider_snapshot: dict[str, Any],
+        prompt_snapshot: dict[str, Any],
+        selection_snapshot: dict[str, Any],
+        force_resubmit: bool,
+    ) -> Path:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        video_info = dict(payload["video"])
+        candidate_frames = [frame for frame in payload["frames"] if frame.get("candidate") and frame.get("image_path")]
+        if not candidate_frames:
+            raise ValueError(f"No candidate frames found in {index_path}")
+
+        video_output_dir = index_path.parent.parent
+        manifest_path = video_output_dir / "analysis.batch.json"
+        if manifest_path.exists() and not force_resubmit:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            existing_state = normalize_batch_state(existing.get("batch", {}).get("state", ""))
+            if existing.get("source_extract_index") == str(index_path) and not is_terminal_batch_state(existing_state):
+                logging.info("Existing async batch is still active for %s: %s", video_info["filename"], manifest_path)
+                return manifest_path
+
+        batch_dir = video_output_dir / "batch"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        request_jsonl_path = batch_dir / f"{safe_filename_stem(video_info['filename'])}.{safe_filename_stem(self.model)}.requests.jsonl"
+        with request_jsonl_path.open("w", encoding="utf-8") as handle:
+            for frame in candidate_frames:
+                handle.write(
+                    json.dumps(
+                        self._build_request_record(frame, prompt_snapshot=prompt_snapshot),
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+
+        uploaded_file = self.client.files.create(file=request_jsonl_path, purpose="batch")
+        batch_job = self.client.batches.create(
+            input_file_id=str(uploaded_file.id),
+            endpoint="/v1/chat/completions",
+            completion_window="24h",
+        )
+        batch_payload = {
+            "stage": "infer.batch",
+            "status": "submitted",
+            "video": video_info,
+            "source_extract_index": str(index_path),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "provider_snapshot": provider_snapshot,
+            "config_snapshot": {
+                "prompt": prompt_snapshot,
+                "selection": selection_snapshot,
+            },
+            "batch": {
+                "provider": self.route_name,
+                "execution_mode": "async_batch",
+                "request_count": len(candidate_frames),
+                "request_jsonl_path": str(request_jsonl_path),
+                "source_file_id": str(uploaded_file.id),
+                "job": json_compatible(batch_job),
+                "id": str(batch_job.id),
+                "state": normalize_batch_state(batch_job.status),
+                "endpoint": "/v1/chat/completions",
+                "output_file_id": str(getattr(batch_job, "output_file_id", "") or ""),
+                "error_file_id": str(getattr(batch_job, "error_file_id", "") or ""),
+            },
+        }
+        manifest_path.write_text(json.dumps(batch_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        logging.info("Submitted %s batch job %s for %s", self.route_name, batch_payload["batch"]["id"], video_info["filename"])
+        logging.info("Wrote %s", manifest_path)
+        return manifest_path
+
+    def collect_batch(self, manifest_path: Path) -> Path:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        batch_info = dict(manifest.get("batch", {}))
+        batch_id = str(batch_info.get("id", "")).strip()
+        if not batch_id:
+            raise ValueError(f"{manifest_path} does not contain a batch id.")
+
+        latest_job = json_compatible(self.client.batches.retrieve(batch_id))
+        batch_info["job"] = latest_job
+        batch_info["state"] = normalize_batch_state(latest_job.get("status", ""))
+        batch_info["output_file_id"] = str(latest_job.get("output_file_id", "") or "")
+        batch_info["error_file_id"] = str(latest_job.get("error_file_id", "") or "")
+        batch_info["request_counts"] = latest_job.get("request_counts", {})
+        manifest["batch"] = batch_info
+        manifest["last_checked_at"] = datetime.now(timezone.utc).isoformat()
+
+        output_file_id = batch_info["output_file_id"]
+        error_file_id = batch_info["error_file_id"]
+        state = batch_info["state"]
+        can_download = bool(output_file_id or error_file_id) and is_terminal_batch_state(state)
+        if not can_download:
+            manifest["status"] = "pending" if not is_terminal_batch_state(state) else "failed"
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            if state == "failed":
+                raise RuntimeError(f"{self.route_name} batch job failed: {json.dumps(latest_job, ensure_ascii=False)}")
+            logging.info("%s batch job is not ready yet: %s", self.route_name.capitalize(), state)
+            logging.info("Updated %s", manifest_path)
+            return manifest_path
+
+        batch_dir = manifest_path.parent / "batch"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        results_path = batch_dir / f"{safe_filename_stem(Path(manifest['video']['filename']).stem)}.responses.jsonl"
+        errors_path = batch_dir / f"{safe_filename_stem(Path(manifest['video']['filename']).stem)}.errors.jsonl"
+
+        if output_file_id:
+            output_content = self.client.files.content(output_file_id)
+            results_path.write_text(self._read_file_content_text(output_content), encoding="utf-8")
+            manifest["batch"]["results_jsonl_path"] = str(results_path)
+        if error_file_id:
+            error_content = self.client.files.content(error_file_id)
+            errors_path.write_text(self._read_file_content_text(error_content), encoding="utf-8")
+            manifest["batch"]["errors_jsonl_path"] = str(errors_path)
+        manifest["status"] = "succeeded" if state == "completed" else state
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        logging.info("Downloaded %s batch results for %s", self.route_name, manifest["video"]["filename"])
+        return results_path if output_file_id else errors_path
+
+    def cancel_batch(self, manifest_path: Path) -> Path:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        batch_info = dict(manifest.get("batch", {}))
+        batch_id = str(batch_info.get("id", "")).strip()
+        if not batch_id:
+            raise ValueError(f"{manifest_path} does not contain a batch id.")
+        cancelled = json_compatible(self.client.batches.cancel(batch_id))
+        batch_info["job"] = cancelled
+        batch_info["state"] = normalize_batch_state(cancelled.get("status", ""))
+        batch_info["output_file_id"] = str(cancelled.get("output_file_id", "") or "")
+        batch_info["error_file_id"] = str(cancelled.get("error_file_id", "") or "")
+        batch_info["request_counts"] = cancelled.get("request_counts", {})
+        manifest["batch"] = batch_info
+        manifest["status"] = "cancelling"
+        manifest["cancel_requested_at"] = datetime.now(timezone.utc).isoformat()
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        logging.info("Requested cancellation for %s", batch_id)
+        logging.info("Updated %s", manifest_path)
+        return manifest_path
 
 
 class GeminiBatchVisionProvider:
@@ -1654,6 +1867,27 @@ def build_gemini_batch_provider(
     )
 
 
+def build_openai_compatible_batch_provider(
+    route: str,
+    remote_config: dict[str, Any],
+    *,
+    temperature: float,
+    timeout_seconds: float,
+) -> OpenAICompatibleBatchVisionProvider:
+    return OpenAICompatibleBatchVisionProvider(
+        route_name=route,
+        api_base=str(remote_config["api_base"]).strip(),
+        model=str(remote_config["model"]).strip(),
+        api_key=resolve_api_key(remote_config),
+        temperature=temperature,
+        timeout_seconds=timeout_seconds,
+        image_transport=str(remote_config.get("image_transport", "base64")).strip(),
+        image_url_template=str(remote_config.get("image_url_template", "")).strip(),
+        json_output=bool(remote_config.get("json_output", True)),
+        extra_body=remote_config.get("extra_body") if isinstance(remote_config.get("extra_body"), dict) else None,
+    )
+
+
 def resolve_execution_mode(route: str, provider_config: dict[str, Any], remote_config: dict[str, Any] | None) -> str:
     requested = str(provider_config.get("submission_mode", "auto")).strip().lower()
     if requested not in {"auto", "sync", "async"}:
@@ -1744,6 +1978,13 @@ def build_provider(provider_config: dict[str, Any]) -> ProviderSelection:
         execution_mode = resolve_execution_mode(route, provider_config, remote_config)
         if route == "gemini" and execution_mode == "async_batch":
             provider_instance = build_gemini_batch_provider(
+                remote_config,
+                temperature=temperature,
+                timeout_seconds=timeout_seconds,
+            )
+        elif route == "qwen" and execution_mode == "async_batch":
+            provider_instance = build_openai_compatible_batch_provider(
+                route,
                 remote_config,
                 temperature=temperature,
                 timeout_seconds=timeout_seconds,
@@ -2496,6 +2737,25 @@ def summarize_batch_error_payload(error_payload: Any) -> str:
     return str(error_payload)
 
 
+def extract_openai_batch_response_text(response_payload: dict[str, Any]) -> str:
+    body = response_payload.get("body", {})
+    if not isinstance(body, dict):
+        return ""
+    choices = body.get("choices", [])
+    if not isinstance(choices, list):
+        return ""
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message", {})
+        if not isinstance(message, dict):
+            continue
+        message_content = extract_message_text(message.get("content"))
+        if message_content:
+            return message_content
+    return ""
+
+
 def parse_gemini_batch_results(
     results_path: Path,
     *,
@@ -2530,6 +2790,67 @@ def parse_gemini_batch_results(
             decisions_by_frame_number[frame_number] = provider_error_decision(
                 f"provider_error: {summarize_provider_exception(exc)}"
             )
+    return decisions_by_frame_number
+
+
+def parse_openai_batch_results(
+    results_path: Path | None,
+    *,
+    selection_snapshot: dict[str, Any],
+    error_results_path: Path | None = None,
+) -> dict[int, dict[str, Any]]:
+    decisions_by_frame_number: dict[int, dict[str, Any]] = {}
+
+    def consume_file(path: Path) -> None:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            frame_number = parse_batch_request_key(str(item.get("custom_id", "")).strip())
+            if frame_number is None:
+                continue
+            error_payload = item.get("error")
+            if error_payload:
+                decisions_by_frame_number[frame_number] = provider_error_decision(
+                    f"provider_error: {summarize_batch_error_payload(error_payload)}"
+                )
+                continue
+
+            response_payload = item.get("response", {})
+            if not isinstance(response_payload, dict):
+                decisions_by_frame_number[frame_number] = provider_error_decision("provider_error: malformed batch response")
+                continue
+            status_code = response_payload.get("status_code")
+            body = response_payload.get("body", {})
+            if isinstance(status_code, int) and status_code >= 400:
+                payload = body.get("error", body) if isinstance(body, dict) else body
+                decisions_by_frame_number[frame_number] = provider_error_decision(
+                    f"provider_error: {summarize_batch_error_payload(payload)}"
+                )
+                continue
+
+            response_text = extract_openai_batch_response_text(response_payload)
+            if not response_text:
+                payload = body.get("error", body) if isinstance(body, dict) else body
+                decisions_by_frame_number[frame_number] = provider_error_decision(
+                    f"provider_error: {summarize_batch_error_payload(payload or 'empty batch response')}"
+                )
+                continue
+            try:
+                decisions_by_frame_number[frame_number] = sanitize_decision(
+                    extract_json_block(response_text),
+                    {"decision": selection_snapshot},
+                )
+            except Exception as exc:  # noqa: BLE001
+                decisions_by_frame_number[frame_number] = provider_error_decision(
+                    f"provider_error: {summarize_provider_exception(exc)}"
+                )
+
+    if results_path and results_path.exists():
+        consume_file(results_path)
+    if error_results_path and error_results_path.exists():
+        consume_file(error_results_path)
     return decisions_by_frame_number
 
 
@@ -2678,23 +2999,37 @@ def infer_from_extract_index(
     return analysis_path
 
 
-def collect_gemini_batch_results(
+def collect_async_batch_results(
     manifest_path: Path,
     *,
     provider: AsyncBatchVisionProvider,
 ) -> Path:
-    results_path = provider.collect_batch(manifest_path)
-    if results_path.resolve() == manifest_path.resolve():
+    collected_path = provider.collect_batch(manifest_path)
+    if collected_path.resolve() == manifest_path.resolve():
         return manifest_path
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    route = str(manifest.get("provider_snapshot", {}).get("selected_route", "")).strip().lower()
     index_path = Path(str(manifest["source_extract_index"])).expanduser().resolve()
     extract_payload = json.loads(index_path.read_text(encoding="utf-8"))
     selection_snapshot = dict(manifest["config_snapshot"]["selection"])
-    decisions_by_frame_number = parse_gemini_batch_results(
-        results_path,
-        selection_snapshot=selection_snapshot,
-    )
+    batch_info = manifest.get("batch", {})
+    if route == "gemini":
+        results_path = Path(str(batch_info["results_jsonl_path"])).expanduser().resolve()
+        decisions_by_frame_number = parse_gemini_batch_results(
+            results_path,
+            selection_snapshot=selection_snapshot,
+        )
+    elif route == "qwen":
+        results_value = str(batch_info.get("results_jsonl_path", "")).strip()
+        errors_value = str(batch_info.get("errors_jsonl_path", "")).strip()
+        decisions_by_frame_number = parse_openai_batch_results(
+            Path(results_value).expanduser().resolve() if results_value else None,
+            selection_snapshot=selection_snapshot,
+            error_results_path=Path(errors_value).expanduser().resolve() if errors_value else None,
+        )
+    else:
+        raise ValueError(f"Collect currently supports Gemini and Qwen async manifests only, got route={route!r}")
     for frame in extract_payload["frames"]:
         if frame.get("candidate") and frame.get("image_path"):
             frame_number = int(frame["frame_number"])
@@ -3311,17 +3646,17 @@ def command_collect(args: argparse.Namespace) -> int:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     provider_snapshot = manifest.get("provider_snapshot", {})
     route = str(provider_snapshot.get("selected_route", "")).strip().lower()
-    if route != "gemini":
-        raise ValueError(f"Collect currently supports Gemini async manifests only, got route={route!r}")
+    if route not in {"gemini", "qwen"}:
+        raise ValueError(f"Collect currently supports Gemini and Qwen async manifests only, got route={route!r}")
 
     provider_config = copy.deepcopy(config["provider"])
-    provider_config["routing"] = "gemini"
+    provider_config["routing"] = route
     provider_config["submission_mode"] = "async"
     provider_selection = build_provider(provider_config)
     if provider_selection.execution_mode != "async_batch" or not hasattr(provider_selection.provider, "collect_batch"):
-        raise RuntimeError("Gemini provider is not configured for async batch collection.")
+        raise RuntimeError(f"{route} provider is not configured for async batch collection.")
 
-    result_path = collect_gemini_batch_results(
+    result_path = collect_async_batch_results(
         manifest_path,
         provider=provider_selection.provider,
     )
@@ -3337,15 +3672,15 @@ def command_cancel(args: argparse.Namespace) -> int:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     provider_snapshot = manifest.get("provider_snapshot", {})
     route = str(provider_snapshot.get("selected_route", "")).strip().lower()
-    if route != "gemini":
-        raise ValueError(f"Cancel currently supports Gemini async manifests only, got route={route!r}")
+    if route not in {"gemini", "qwen"}:
+        raise ValueError(f"Cancel currently supports Gemini and Qwen async manifests only, got route={route!r}")
 
     provider_config = copy.deepcopy(config["provider"])
-    provider_config["routing"] = "gemini"
+    provider_config["routing"] = route
     provider_config["submission_mode"] = "async"
     provider_selection = build_provider(provider_config)
     if provider_selection.execution_mode != "async_batch" or not hasattr(provider_selection.provider, "cancel_batch"):
-        raise RuntimeError("Gemini provider is not configured for async batch cancellation.")
+        raise RuntimeError(f"{route} provider is not configured for async batch cancellation.")
 
     provider_selection.provider.cancel_batch(manifest_path)
     return 0

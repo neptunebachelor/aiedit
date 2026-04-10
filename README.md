@@ -128,6 +128,18 @@ python pipeline.py collect \
   --manifest ./output/lap01/analysis.batch.json
 ```
 
+Opt into Qwen async batch submission for long-running coarse infer:
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider qwen \
+  --model qwen3.5-plus \
+  --submission-mode async
+```
+
+`collect` and `cancel` now support both Gemini and Qwen async manifests.
+
 ### 3. Temporal analysis (recommended)
 
 ```bash
