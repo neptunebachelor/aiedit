@@ -5,7 +5,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def format_srt_timestamp(seconds: float) -> str:
@@ -577,18 +577,44 @@ def render_video(
     preset: str,
     crf: int,
     scale_height: int | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     temp_dir = output_video.parent / f"{output_video.stem}_parts"
     temp_dir.mkdir(parents=True, exist_ok=True)
 
+    def emit_progress(event: str, **payload: Any) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "event": event,
+                "output_video": str(output_video),
+                "source_video": str(source_video),
+                "total_clips": len(clips),
+                **payload,
+            }
+        )
+
     concat_entries: list[str] = []
+    emit_progress("start")
     for index, clip in enumerate(clips, start=1):
         clip_path = temp_dir / f"clip_{index:03d}.mp4"
         concat_entries.append(f"file '{clip_path.name}'")
+        emit_progress(
+            "clip_started",
+            clip_index=index,
+            clip_path=str(clip_path),
+            source_start_seconds=round(float(clip["source_start_seconds"]), 3),
+            source_end_seconds=round(float(clip["source_end_seconds"]), 3),
+        )
         run_ffmpeg(
             [
                 ffmpeg_path,
                 "-y",
+                "-hide_banner",
+                "-nostats",
+                "-loglevel",
+                "error",
                 "-ss",
                 f"{float(clip['source_start_seconds']):.3f}",
                 "-to",
@@ -620,13 +646,19 @@ def render_video(
                 str(clip_path),
             ]
         )
+        emit_progress("clip_completed", clip_index=index, clip_path=str(clip_path))
 
     concat_list_path = temp_dir / "concat.txt"
     concat_list_path.write_text("\n".join(concat_entries) + "\n", encoding="utf-8")
+    emit_progress("concat_started", concat_list_path=str(concat_list_path))
     run_ffmpeg(
         [
             ffmpeg_path,
             "-y",
+            "-hide_banner",
+            "-nostats",
+            "-loglevel",
+            "error",
             "-f",
             "concat",
             "-safe",
@@ -643,6 +675,7 @@ def render_video(
         ],
         cwd=temp_dir,
     )
+    emit_progress("completed", concat_list_path=str(concat_list_path))
 
 
 def main() -> int:
@@ -713,6 +746,34 @@ def main() -> int:
             raise FileNotFoundError(f"Source video not found: {source_path}")
         ffmpeg_path = find_ffmpeg(args.ffmpeg)
         video_path = output_dir / f"{args.stem}.mp4"
+
+        def log_render_progress(event: dict[str, Any]) -> None:
+            event_name = str(event.get("event", "")).strip()
+            total_clips = int(event.get("total_clips", 0) or 0)
+            if event_name == "start":
+                print(f"Render progress: preparing {total_clips} clip(s) for {video_path.name}")
+                return
+            if event_name == "clip_started":
+                clip_index = int(event.get("clip_index", 0) or 0)
+                source_start = float(event.get("source_start_seconds", 0.0) or 0.0)
+                source_end = float(event.get("source_end_seconds", 0.0) or 0.0)
+                print(
+                    "Render progress: clip "
+                    f"{clip_index}/{total_clips} "
+                    f"({source_start:.3f}s -> {source_end:.3f}s)"
+                )
+                return
+            if event_name == "clip_completed":
+                clip_index = int(event.get("clip_index", 0) or 0)
+                print(f"Render progress: finished clip {clip_index}/{total_clips}")
+                return
+            if event_name == "concat_started":
+                print("Render progress: concatenating clips")
+                return
+            if event_name == "completed":
+                print(f"Render progress: completed {video_path.name}")
+                return
+
         render_video(
             ffmpeg_path=ffmpeg_path,
             source_video=source_path.resolve(),
@@ -720,6 +781,7 @@ def main() -> int:
             clips=exported_segments,
             preset=str(args.preset),
             crf=int(args.crf),
+            progress_callback=log_render_progress,
         )
         print(f"Wrote {video_path}")
 
