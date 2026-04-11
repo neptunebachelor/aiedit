@@ -237,6 +237,51 @@ The older `run_gemini_packed.py` runner is only for running from a normal shell 
 
 If the current Gemini CLI session cannot inspect local image files directly, stop and tell the user to run the External Runner Path from a normal shell instead of attempting a nested `gemini` command.
 
+## File API Packed Inference
+
+Use this path when the user wants Codex or Gemini tooling to control tests while the model reads previously uploaded image files by provider file reference. This is different from the Gemini CLI `@local/image.jpg` workflow and different from the pipeline's async JSONL batch upload. Here, every extracted screenshot is uploaded first, then comparative packed inference references provider file IDs or URIs.
+
+Default behavior:
+
+- Upload frames from `extract/index.json` with `candidate=true` and `image_path` by default.
+- Use `--include all` during upload when the user explicitly asks to upload every screenshot file with `image_path`.
+- Inference still uses candidate frames by default, even when the upload manifest includes all frames. Pass `--include-all-frames` to `run_file_api_packed.py` only for an explicit all-frame audit.
+- Keep one file upload manifest per provider under `<video_dir>/infer/file_uploads.<provider>.json`.
+- Keep one inference decisions file per provider under `<video_dir>/infer/<provider>_file_api.frame_decisions.jsonl`.
+
+Upload file references:
+
+```powershell
+python <skill_dir>/scripts/upload_frame_files.py --index <extract/index.json> --provider openai --include all --reuse
+python <skill_dir>/scripts/upload_frame_files.py --index <extract/index.json> --provider gemini --include all --reuse
+```
+
+For OpenAI, upload images with the Files API using `purpose="vision"` and reference each image in the Responses API as an `input_image` with `file_id`. For Gemini, upload images with the Gemini Files API and reference each image by `file_uri` plus MIME type in `generateContent`.
+
+Run controlled packed inference:
+
+```powershell
+python <skill_dir>/scripts/run_file_api_packed.py --upload-manifest <video_dir>/infer/file_uploads.openai.json --provider openai --model gpt-4.1-mini --pack-size 5 --max-frames 20 --prompt-variant calibration --dry-run
+python <skill_dir>/scripts/run_file_api_packed.py --upload-manifest <video_dir>/infer/file_uploads.openai.json --provider openai --model gpt-4.1-mini --pack-size 5 --max-frames 20 --prompt-variant calibration --apply
+```
+
+Use the same shape for Gemini:
+
+```powershell
+python <skill_dir>/scripts/run_file_api_packed.py --upload-manifest <video_dir>/infer/file_uploads.gemini.json --provider gemini --model gemini-2.5-flash-lite --pack-size 5 --max-frames 20 --prompt-variant calibration --apply
+```
+
+The runner writes `run_manifest.json` and per-pack raw responses under `<video_dir>/infer/file_api_runs/`. The run manifest must record all controlled variables: provider, model, pack size, pack range, max frames, prompt variant, temperature, minimum keep score, retry policy, candidate frame numbers, `upload_manifest_hash`, and `prompt_hash`.
+
+File API prompt discipline:
+
+- Start with calibration: `--pack-size 5 --max-frames 20 --prompt-variant calibration`.
+- Then run the normal pass: `--pack-size 20` with the same model, temperature, and prompt variant.
+- Use a larger pack size only after dry-run planning and calibration responses validate.
+- Change one variable per test round. If testing model quality, keep pack size, prompt variant, temperature, frame range, and upload manifest fixed. If testing pack size, keep model, prompt variant, temperature, frame range, and upload manifest fixed.
+- The prompt must require one JSON object for every listed `frame_number`, no markdown, no comments, no code fences, and keys `frame_number`, `keep`, `score`, `labels`, `reason`, `discard_reason`.
+- If a pack response is malformed, missing frames, or duplicates frames, retry once with the strict retry prompt. If still invalid, write valid reject decisions with `discard_reason` beginning `skill_error:` so downstream stages remain usable.
+
 ### Model Selection And Output Rules
 
 1. Select the model deliberately:
