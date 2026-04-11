@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import cv2
 import requests
@@ -1014,7 +1014,7 @@ def parse_args() -> argparse.Namespace:
 
     review_parser = subparsers.add_parser("review", help="Build a reviewable edit plan and optional preview.")
     review_parser.add_argument("--input", required=True, help="Path to analysis.json, segments.raw.json, or editable JSON.")
-    review_parser.add_argument("--output-dir", help="Destination directory for review outputs.")
+    review_parser.add_argument("--output-dir", help="Destination directory for review outputs. Defaults to the input JSON directory.")
     review_parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
     review_parser.add_argument("--target-seconds", type=float, help="Target total duration for the compact plan.")
     review_parser.add_argument(
@@ -1050,7 +1050,7 @@ def parse_args() -> argparse.Namespace:
 
     render_parser = subparsers.add_parser("render", help="Render a final video from a reviewed plan or raw analysis.")
     render_parser.add_argument("--input", required=True, help="Path to review JSON, editable JSON, or analysis.json.")
-    render_parser.add_argument("--output-dir", help="Destination directory for rendered outputs.")
+    render_parser.add_argument("--output-dir", help="Destination directory for rendered outputs. Defaults to the input JSON directory.")
     render_parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
     render_parser.add_argument("--target-seconds", type=float, help="Target duration when rendering from raw analysis.")
     render_parser.add_argument(
@@ -1187,7 +1187,7 @@ def parse_args() -> argparse.Namespace:
         help="Build temporal candidate/window analysis artifacts and a refined 30s highlight proposal.",
     )
     temporal_parser.add_argument("--input", required=True, help="Path to analysis.json.")
-    temporal_parser.add_argument("--output-dir", help="Destination directory for temporal artifacts.")
+    temporal_parser.add_argument("--output-dir", help="Destination directory for temporal artifacts. Defaults to the input JSON directory.")
     temporal_parser.add_argument("--top-k", type=int, default=5, help="Top coarse candidate segments to analyze.")
     temporal_parser.add_argument("--window-seconds", type=float, default=3.0, help="Temporal window size in seconds.")
     temporal_parser.add_argument("--window-stride", type=float, default=1.5, help="Sliding-window stride in seconds.")
@@ -1211,7 +1211,7 @@ def parse_args() -> argparse.Namespace:
 
 def add_common_video_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--video", required=True, help="Video file or folder.")
-    parser.add_argument("--output-root", help="Root directory for pipeline outputs.")
+    parser.add_argument("--output-root", help="Root directory for pipeline outputs. Defaults to each source video's parent directory.")
     parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
 
 
@@ -1399,6 +1399,21 @@ def resolve_output_root(config: dict[str, Any], override: str | None, video_path
 def resolve_video_output_dir(config: dict[str, Any], override: str | None, video_path: Path) -> Path:
     output_root = resolve_output_root(config, override, video_path)
     return output_root / video_path.stem
+
+
+def resolve_stage_output_dir(
+    input_path: Path,
+    output_override: str | None,
+    payload: dict[str, Any] | None = None,
+) -> Path:
+    if output_override:
+        return Path(output_override).expanduser().resolve()
+    if payload:
+        source_path_text = str(payload.get("video", {}).get("source_path", "")).strip()
+        if source_path_text:
+            source_path = Path(source_path_text).expanduser().resolve()
+            return source_path.parent / source_path.stem
+    return input_path.parent
 
 
 def probe_video(video_path: Path) -> VideoMeta:
@@ -2150,6 +2165,19 @@ def progress_path_for_index(index_path: Path) -> Path:
     return index_path.parent.parent / "infer.progress.json"
 
 
+def review_progress_path_for_output_dir(output_dir: Path) -> Path:
+    return output_dir / "review.progress.json"
+
+
+def write_review_progress(output_dir: Path, payload: dict[str, Any]) -> Path:
+    progress_path = review_progress_path_for_output_dir(output_dir)
+    progress_payload = copy.deepcopy(payload)
+    progress_payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text(json.dumps(progress_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return progress_path
+
+
 def extract_decision_fields(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "keep": bool(record.get("keep", False)),
@@ -2668,7 +2696,7 @@ def command_temporal(args: argparse.Namespace) -> int:
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     if "frames" not in payload or "segments" not in payload:
         raise ValueError(f"{input_path} must be an infer analysis.json containing frames and segments.")
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
+    output_dir = resolve_stage_output_dir(input_path, getattr(args, "output_dir", None), payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     records = list(payload["frames"])
     segments = list(payload["segments"])
@@ -3431,6 +3459,7 @@ def render_preview_if_requested(
     output_dir: Path,
     stem: str,
     segments: list[dict[str, Any]],
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[Path | None, Path | None]:
     if not requested:
         return None, None
@@ -3453,6 +3482,7 @@ def render_preview_if_requested(
         preset=str(preview_settings["preset"]),
         crf=int(preview_settings["crf"]),
         scale_height=preview_height,
+        progress_callback=progress_callback,
     )
     return preview_path, preview_srt_path
 
@@ -3693,7 +3723,7 @@ def command_review(args: argparse.Namespace) -> int:
     payload = load_payload(input_path, None)
     review_settings = resolve_review_settings(config, args)
     stem = args.stem or default_stem(float(review_settings["target_seconds"]))
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
+    output_dir = resolve_stage_output_dir(input_path, getattr(args, "output_dir", None), payload)
     preview_settings = copy.deepcopy(config["preview"])
     if args.preview_resolution:
         preview_settings["resolution"] = args.preview_resolution
@@ -3702,52 +3732,188 @@ def command_review(args: argparse.Namespace) -> int:
     if args.preview_preset:
         preview_settings["preset"] = args.preview_preset
     variants = build_review_variants(payload, review_settings)
-    manifest_variants: list[dict[str, Any]] = []
     total_variants = len(variants)
-    for variant in variants:
-        variant_index = int(variant["index"])
-        variant_segments = list(variant["segments"])
-        current_stem = variant_stem(stem, variant_index, total_variants)
-        outputs = write_review_outputs(
-            payload=payload,
-            input_path=input_path,
-            output_dir=output_dir,
-            stem=current_stem,
-            review_settings=review_settings,
-            segments=variant_segments,
-        )
-        preview_path, preview_srt_path = render_preview_if_requested(
-            requested=bool(args.preview or preview_settings.get("enabled", False)),
-            preview_settings=preview_settings,
-            ffmpeg_override=args.ffmpeg,
-            payload=payload,
-            output_dir=output_dir,
-            stem=current_stem,
-            segments=variant_segments,
-        )
-        manifest_entry = {"index": variant_index, "stem": current_stem, **{key: str(path) for key, path in outputs.items()}}
-        if preview_path:
-            manifest_entry["preview"] = str(preview_path)
-        if preview_srt_path:
-            manifest_entry["preview_srt"] = str(preview_srt_path)
-        manifest_variants.append(manifest_entry)
-        for path in outputs.values():
-            logging.info("Wrote %s", path)
-        if preview_path:
-            logging.info("Wrote %s", preview_path)
-        if preview_srt_path:
-            logging.info("Wrote %s", preview_srt_path)
-    if total_variants > 1:
-        manifest_path = output_dir / f"{stem}.review.index.json"
-        manifest_payload = {
-            "stage": "review_index",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "variant_count": total_variants,
-            "variants": manifest_variants,
-        }
-        manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        logging.info("Wrote %s", manifest_path)
-    return 0
+    progress_state: dict[str, Any] = {
+        "stage": "review.progress",
+        "status": "running",
+        "source_input": str(input_path),
+        "output_dir": str(output_dir),
+        "stem": stem,
+        "total_variants": total_variants,
+        "completed_variants": 0,
+        "remaining_variants": total_variants,
+        "current_step": "build_review_variants",
+        "current_variant": None,
+        "preview": {
+            "requested": bool(args.preview or preview_settings.get("enabled", False)),
+            "status": "idle",
+            "total_clips": 0,
+            "completed_clips": 0,
+            "current_clip": 0,
+            "current_clip_path": "",
+            "current_clip_source_start_seconds": None,
+            "current_clip_source_end_seconds": None,
+        },
+        "outputs": {},
+        "review_index_path": "",
+        "error": "",
+    }
+
+    def emit_review_progress(**updates: Any) -> Path:
+        progress_state.update({key: value for key, value in updates.items() if value is not None})
+        progress_state["remaining_variants"] = max(0, total_variants - int(progress_state.get("completed_variants", 0)))
+        progress_path = write_review_progress(output_dir, progress_state)
+        current_variant = progress_state.get("current_variant") or {}
+        preview_state = progress_state.get("preview") or {}
+        current_step = str(progress_state.get("current_step", "")).strip()
+        current_variant_index = int(current_variant.get("index", 0) or 0)
+        preview_total = int(preview_state.get("total_clips", 0) or 0)
+        preview_completed = int(preview_state.get("completed_clips", 0) or 0)
+        message = f"Review progress: {int(progress_state.get('completed_variants', 0))}/{total_variants} variant(s)"
+        if current_variant_index:
+            message += f", active variant {current_variant_index}/{total_variants}"
+            if current_variant.get("stem"):
+                message += f" ({current_variant['stem']})"
+        if current_step:
+            message += f", step={current_step}"
+        if preview_total:
+            message += f", preview clips {preview_completed}/{preview_total}"
+        logging.info("%s", message)
+        return progress_path
+
+    emit_review_progress()
+    manifest_variants: list[dict[str, Any]] = []
+    try:
+        for variant in variants:
+            variant_index = int(variant["index"])
+            variant_segments = list(variant["segments"])
+            current_stem = variant_stem(stem, variant_index, total_variants)
+            emit_review_progress(
+                current_step="build_review_outputs",
+                completed_variants=max(0, variant_index - 1),
+                current_variant={
+                    "index": variant_index,
+                    "stem": current_stem,
+                    "segment_count": len(variant_segments),
+                },
+            )
+            outputs = write_review_outputs(
+                payload=payload,
+                input_path=input_path,
+                output_dir=output_dir,
+                stem=current_stem,
+                review_settings=review_settings,
+                segments=variant_segments,
+            )
+            review_outputs = {key: str(path) for key, path in outputs.items()}
+            emit_review_progress(
+                current_step="build_review_outputs",
+                completed_variants=max(0, variant_index - 1),
+                current_variant={
+                    "index": variant_index,
+                    "stem": current_stem,
+                    "segment_count": len(variant_segments),
+                    "output_paths": review_outputs,
+                },
+                outputs=review_outputs,
+            )
+            preview_path, preview_srt_path = render_preview_if_requested(
+                requested=bool(args.preview or preview_settings.get("enabled", False)),
+                preview_settings=preview_settings,
+                ffmpeg_override=args.ffmpeg,
+                progress_callback=lambda event, *, _variant_index=variant_index, _variant_stem=current_stem, _variant_segments=variant_segments, _outputs=outputs: emit_review_progress(
+                    current_step="render_preview" if str(event.get("event", "")).strip() != "completed" else "variant_completed",
+                    completed_variants=max(0, _variant_index - 1),
+                    current_variant={
+                        "index": _variant_index,
+                        "stem": _variant_stem,
+                        "segment_count": len(_variant_segments),
+                        "output_paths": {key: str(path) for key, path in _outputs.items()},
+                    },
+                    preview={
+                        "requested": True,
+                        "status": {
+                            "start": "running",
+                            "clip_started": "running",
+                            "clip_completed": "running",
+                            "concat_started": "finalizing",
+                            "completed": "completed",
+                        }.get(str(event.get("event", "")).strip(), "running"),
+                        "total_clips": len(_variant_segments),
+                        "completed_clips": {
+                            "start": 0,
+                            "clip_started": max(0, int(event.get("clip_index", 0) or 0) - 1),
+                            "clip_completed": max(0, int(event.get("clip_index", 0) or 0)),
+                            "concat_started": len(_variant_segments),
+                            "completed": len(_variant_segments),
+                        }.get(str(event.get("event", "")).strip(), len(_variant_segments)),
+                        "current_clip": int(event.get("clip_index", 0) or 0),
+                        "current_clip_path": str(event.get("clip_path", "") or ""),
+                        "current_clip_source_start_seconds": event.get("source_start_seconds"),
+                        "current_clip_source_end_seconds": event.get("source_end_seconds"),
+                    },
+                ),
+                payload=payload,
+                output_dir=output_dir,
+                stem=current_stem,
+                segments=variant_segments,
+            )
+            manifest_entry = {"index": variant_index, "stem": current_stem, **review_outputs}
+            if preview_path:
+                manifest_entry["preview"] = str(preview_path)
+            if preview_srt_path:
+                manifest_entry["preview_srt"] = str(preview_srt_path)
+            manifest_variants.append(manifest_entry)
+            for path in outputs.values():
+                logging.info("Wrote %s", path)
+            if preview_path:
+                logging.info("Wrote %s", preview_path)
+            if preview_srt_path:
+                logging.info("Wrote %s", preview_srt_path)
+            emit_review_progress(
+                completed_variants=variant_index,
+                current_step="variant_completed",
+                current_variant={
+                    "index": variant_index,
+                    "stem": current_stem,
+                    "segment_count": len(variant_segments),
+                    "output_paths": review_outputs,
+                },
+                preview={
+                    "requested": bool(args.preview or preview_settings.get("enabled", False)),
+                    "status": "completed" if preview_path else "skipped",
+                    "total_clips": len(variant_segments),
+                    "completed_clips": len(variant_segments) if preview_path else 0,
+                    "current_clip": len(variant_segments) if preview_path else 0,
+                    "current_clip_path": str(preview_path or ""),
+                    "current_clip_source_start_seconds": None,
+                    "current_clip_source_end_seconds": None,
+                },
+                outputs={
+                    **review_outputs,
+                    **({"preview": str(preview_path)} if preview_path else {}),
+                    **({"preview_srt": str(preview_srt_path)} if preview_srt_path else {}),
+                },
+            )
+        if total_variants > 1:
+            manifest_path = output_dir / f"{stem}.review.index.json"
+            manifest_payload = {
+                "stage": "review_index",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "variant_count": total_variants,
+                "variants": manifest_variants,
+            }
+            manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            logging.info("Wrote %s", manifest_path)
+            emit_review_progress(review_index_path=str(manifest_path))
+        emit_review_progress(status="completed", current_step="completed", completed_variants=total_variants)
+        return 0
+    except KeyboardInterrupt:
+        emit_review_progress(status="interrupted", current_step="interrupted", error="keyboard_interrupt")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        emit_review_progress(status="failed", current_step="failed", error=str(exc))
+        raise
 
 
 def command_render(args: argparse.Namespace) -> int:
@@ -3755,7 +3921,7 @@ def command_render(args: argparse.Namespace) -> int:
     config = load_pipeline_config(Path(args.config).expanduser())
     input_path = Path(args.input).expanduser().resolve()
     payload = load_payload(input_path, None)
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
+    output_dir = resolve_stage_output_dir(input_path, getattr(args, "output_dir", None), payload)
 
     review_settings = resolve_review_settings(config, args)
     if args.caption_mode:
@@ -3775,6 +3941,36 @@ def command_render(args: argparse.Namespace) -> int:
     variants = build_review_variants(payload, review_settings)
     manifest_variants: list[dict[str, Any]] = []
     total_variants = len(variants)
+
+    def log_render_progress(event: dict[str, Any], *, _output_video_name: str) -> None:
+        event_name = str(event.get("event", "")).strip()
+        total_clips = int(event.get("total_clips", 0) or 0)
+        if event_name == "start":
+            logging.info("Render progress: preparing %s clip(s) for %s", total_clips, _output_video_name)
+            return
+        if event_name == "clip_started":
+            clip_index = int(event.get("clip_index", 0) or 0)
+            source_start = float(event.get("source_start_seconds", 0.0) or 0.0)
+            source_end = float(event.get("source_end_seconds", 0.0) or 0.0)
+            logging.info(
+                "Render progress: clip %s/%s (%.3fs -> %.3fs)",
+                clip_index,
+                total_clips,
+                source_start,
+                source_end,
+            )
+            return
+        if event_name == "clip_completed":
+            clip_index = int(event.get("clip_index", 0) or 0)
+            logging.info("Render progress: finished clip %s/%s", clip_index, total_clips)
+            return
+        if event_name == "concat_started":
+            logging.info("Render progress: concatenating clips")
+            return
+        if event_name == "completed":
+            logging.info("Render progress: completed %s", _output_video_name)
+            return
+
     for variant in variants:
         variant_index = int(variant["index"])
         variant_segments = list(variant["segments"])
@@ -3788,6 +3984,10 @@ def command_render(args: argparse.Namespace) -> int:
             render_settings=render_settings,
         )
         output_video = output_dir / f"{current_stem}.mp4"
+
+        def progress_callback(event: dict[str, Any], *, _output_video_name: str = output_video.name) -> None:
+            log_render_progress(event, _output_video_name=_output_video_name)
+
         render_video(
             ffmpeg_path=ffmpeg_path,
             source_video=source_path,
@@ -3796,6 +3996,7 @@ def command_render(args: argparse.Namespace) -> int:
             preset=str(render_settings["preset"]),
             crf=int(render_settings["crf"]),
             scale_height=scale_height,
+            progress_callback=progress_callback,
         )
         manifest_variants.append(
             {
@@ -3839,9 +4040,15 @@ def command_run(args: argparse.Namespace) -> int:
 
         command_extract(video_args)
         command_infer(video_args)
+        index_path = (
+            Path(video_args.extract_index).expanduser().resolve()
+            if getattr(video_args, "extract_index", None)
+            else ensure_extract_index(video_args, config)
+        )
+        stage_output_dir = index_path.parent.parent
         temporal_args = argparse.Namespace(
-            input=str(video_output_dir / "analysis.json"),
-            output_dir=str(video_output_dir),
+            input=str(stage_output_dir / "analysis.json"),
+            output_dir=str(stage_output_dir),
             top_k=5,
             window_seconds=3.0,
             window_stride=1.5,
@@ -3853,12 +4060,12 @@ def command_run(args: argparse.Namespace) -> int:
         command_temporal(temporal_args)
 
         if bool(getattr(args, "skip_review", False)):
-            render_input = video_output_dir / "analysis.json"
-            command_render(argparse.Namespace(**vars(video_args), input=str(render_input), output_dir=str(video_output_dir)))
+            render_input = stage_output_dir / "analysis.json"
+            command_render(argparse.Namespace(**vars(video_args), input=str(render_input), output_dir=str(stage_output_dir)))
         else:
             review_args = argparse.Namespace(**vars(video_args))
-            review_args.input = str(video_output_dir / "analysis.json")
-            review_args.output_dir = str(video_output_dir)
+            review_args.input = str(stage_output_dir / "analysis.json")
+            review_args.output_dir = str(stage_output_dir)
             review_settings = resolve_review_settings(config, review_args)
             review_stem = review_args.stem or default_stem(float(review_settings["target_seconds"]))
             variants = build_review_variants(load_payload(Path(review_args.input), None), review_settings)
@@ -3869,7 +4076,7 @@ def command_run(args: argparse.Namespace) -> int:
                 outputs = write_review_outputs(
                     payload=load_payload(Path(review_args.input), None),
                     input_path=Path(review_args.input),
-                    output_dir=video_output_dir,
+                    output_dir=stage_output_dir,
                     stem=current_stem,
                     review_settings=review_settings,
                     segments=list(variant["segments"]),
@@ -3878,7 +4085,7 @@ def command_run(args: argparse.Namespace) -> int:
                     logging.info("Wrote %s", path)
                 render_args = argparse.Namespace(**vars(video_args))
                 render_args.input = str(outputs["editable_json"])
-                render_args.output_dir = str(video_output_dir)
+                render_args.output_dir = str(stage_output_dir)
                 render_args.stem = current_stem
                 command_render(render_args)
     return 0

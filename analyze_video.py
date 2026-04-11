@@ -118,7 +118,7 @@ class FrameMetrics:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze front-facing videos with a local Ollama vision model.")
     parser.add_argument("--input", help="Video file or folder. Defaults to config.project.input")
-    parser.add_argument("--output", help="Output folder. Defaults to config.project.output")
+    parser.add_argument("--output", help="Output folder override. Defaults to a sibling folder beside each source video.")
     parser.add_argument("--config", default="config.toml", help="TOML config path")
     parser.add_argument("--extract-only", action="store_true", help="Skip Ollama and export frame candidates only")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -144,10 +144,10 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def resolve_paths(config: dict[str, Any], args: argparse.Namespace) -> tuple[Path, Path]:
+def resolve_paths(config: dict[str, Any], args: argparse.Namespace) -> tuple[Path, Path | None]:
     project = config["project"]
     input_path = Path(args.input or project["input"]).expanduser().resolve()
-    output_path = Path(args.output or project["output"]).expanduser().resolve()
+    output_path = Path(args.output).expanduser().resolve() if args.output else None
     return input_path, output_path
 
 
@@ -534,7 +534,8 @@ def main() -> int:
 
     config = load_config(Path(args.config).expanduser())
     input_path, output_path = resolve_paths(config, args)
-    output_path.mkdir(parents=True, exist_ok=True)
+    if output_path is not None:
+        output_path.mkdir(parents=True, exist_ok=True)
     videos = list_videos(input_path, config)
 
     if not videos:
@@ -542,7 +543,8 @@ def main() -> int:
 
     for video_path in videos:
         logging.info("Analyzing %s", video_path)
-        analysis = analyze_video(video_path, output_path, config, args.extract_only)
+        video_output_root = output_path or video_path.parent.resolve()
+        analysis = analyze_video(video_path, video_output_root, config, args.extract_only)
         logging.info(
             "Finished %s | segments=%s | duration=%.1fs",
             video_path.name,

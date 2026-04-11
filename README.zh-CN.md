@@ -73,7 +73,7 @@ python pipeline.py infer \
 
 ```bash
 python pipeline.py review \
-  --input ./output/lap01/analysis.json \
+  --input ./input/lap01/analysis.json \
   --target-seconds 30 \
   --caption-mode human \
   --preview \
@@ -81,7 +81,7 @@ python pipeline.py review \
 
 # 连续 30s 单段（不拼接碎片）
 python pipeline.py review \
-  --input ./output/lap01/analysis.json \
+  --input ./input/lap01/analysis.json \
   --target-seconds 30 \
   --selection-mode single_continuous \
   --single-top-k 5 \
@@ -91,7 +91,7 @@ python pipeline.py review \
 这一步会输出：
 
 ```text
-output/lap01/
+input/lap01/
 |-- highlights_30s.review.json
 |-- highlights_30s.editable.json
 |-- highlights_30s.final.srt
@@ -112,7 +112,7 @@ output/lap01/
 
 ```bash
 python pipeline.py edit update-segment \
-  --plan ./output/lap01/highlights_30s.editable.json \
+  --plan ./input/lap01/highlights_30s.editable.json \
   --rank 3 \
   --source-start-seconds 150.2 \
   --source-end-seconds 153.2
@@ -122,7 +122,7 @@ python pipeline.py edit update-segment \
 
 ```bash
 python pipeline.py edit update-caption \
-  --plan ./output/lap01/highlights_30s.editable.json \
+  --plan ./input/lap01/highlights_30s.editable.json \
   --rank 3 \
   --caption "Handlebar wobble starts here." \
   --caption-detail "Close to the tyre wall."
@@ -134,7 +134,7 @@ python pipeline.py edit update-caption \
 
 ```bash
 python pipeline.py render \
-  --input ./output/lap01/highlights_30s.editable.json \
+  --input ./input/lap01/highlights_30s.editable.json \
   --stem lap01_final \
   --resolution source
 ```
@@ -143,7 +143,7 @@ python pipeline.py render \
 
 ```bash
 python pipeline.py render \
-  --input ./output/lap01/highlights_30s.editable.json \
+  --input ./input/lap01/highlights_30s.editable.json \
   --stem lap01_final_720p \
   --resolution 720p
 ```
@@ -174,7 +174,7 @@ python pipeline.py render \
 
 ### 中途更换模型并继续推理
 
-`infer` 阶段会把已完成帧写入 `output/<video>/frame_decisions.checkpoint.jsonl`。同一个视频再次执行 `infer` 时会自动跳过已完成帧，只处理剩余帧，所以你可以中途换模型继续跑：
+`infer` 阶段会把已完成帧写入 `<source_video_dir>/<video>/frame_decisions.checkpoint.jsonl`。同一个视频再次执行 `infer` 时会自动跳过已完成帧，只处理剩余帧，所以你可以中途换模型继续跑：
 
 ```bash
 python pipeline.py infer --video ./input/lap01.mp4 --provider api --model gpt-4.1-mini
@@ -191,7 +191,7 @@ python pipeline.py infer --video ./input/lap01.mp4 --provider api --model gpt-4.
 典型输出目录如下：
 
 ```text
-output/lap01/
+input/lap01/
 |-- extract/
 |   |-- frames/
 |   `-- index.json
