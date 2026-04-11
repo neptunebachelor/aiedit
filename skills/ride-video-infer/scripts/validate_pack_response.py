@@ -50,7 +50,7 @@ def load_response(response_path: Path) -> list[dict[str, Any]]:
     return [normalize_decision(item) for item in payload if isinstance(item, dict)]
 
 
-def validate_pack(pack_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def validate_pack(pack_dir: Path, *, min_keep_score: float) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     manifest_path = pack_dir / "manifest.json"
     response_path = pack_dir / "response.json"
     manifest = read_json(manifest_path)
@@ -76,6 +76,15 @@ def validate_pack(pack_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]
         for decision in ordered
         if str(decision.get("discard_reason", "")).startswith("skill_error:")
     ]
+    keep_score_mismatches = [
+        {
+            "frame_number": int(decision["frame_number"]),
+            "score": float(decision.get("score", 0.0) or 0.0),
+            "keep": bool(decision.get("keep", False)),
+        }
+        for decision in ordered
+        if bool(decision.get("keep", False)) != (float(decision.get("score", 0.0) or 0.0) >= min_keep_score)
+    ]
     summary = {
         "pack_dir": str(pack_dir),
         "manifest_path": str(manifest_path),
@@ -87,8 +96,16 @@ def validate_pack(pack_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]
         "extra": extra,
         "duplicates": sorted(duplicates),
         "skill_errors": skill_errors,
+        "keep_score_mismatches": keep_score_mismatches,
         "keep_count": sum(1 for decision in ordered if decision.get("keep")),
-        "valid": not missing and not extra and not duplicates and not skill_errors and len(ordered) == len(expected),
+        "valid": (
+            not missing
+            and not extra
+            and not duplicates
+            and not skill_errors
+            and not keep_score_mismatches
+            and len(ordered) == len(expected)
+        ),
     }
     return summary, ordered
 
@@ -109,6 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--append-decisions", help="Append valid decisions to this JSONL")
     parser.add_argument("--overwrite-decisions", action="store_true", help="Delete decisions JSONL before appending")
     parser.add_argument("--summary", help="Write validation summary JSON here")
+    parser.add_argument("--min-keep-score", type=float, default=0.65, help="Score threshold that keep must match")
     return parser.parse_args()
 
 
@@ -135,7 +153,7 @@ def main() -> int:
     summaries: list[dict[str, Any]] = []
     all_valid_decisions: list[dict[str, Any]] = []
     for pack_dir in pack_dirs:
-        summary, decisions = validate_pack(pack_dir)
+        summary, decisions = validate_pack(pack_dir, min_keep_score=float(args.min_keep_score))
         summaries.append(summary)
         if summary["valid"]:
             all_valid_decisions.extend(decisions)

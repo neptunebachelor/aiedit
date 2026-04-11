@@ -224,13 +224,13 @@ def build_prompt(pack: list[dict[str, Any]], *, strict_retry: bool = False) -> s
         "High scores: apex/lean, rapid transition, scenery reveal, nearby traffic, overtake, near pass, high speed, strong motion.",
         "Low scores: waiting, parking, boring straight, severe blur, repetitive low-value frames.",
         "",
-        "Before deciding, read each listed image file from the current workspace.",
+        "Before deciding, inspect each listed image attachment from the current workspace.",
         "Frames to analyze:",
     ]
     for frame in pack:
         lines.append(
             f"- Frame {int(frame['frame_number'])}, timestamp {float(frame.get('timestamp_seconds', 0.0)):.3f}s, "
-            f"image images/{frame['workspace_image_name']}"
+            f"image @images/{frame['workspace_image_name']}"
         )
     lines.extend(
         [
@@ -252,7 +252,10 @@ def build_prompt(pack: list[dict[str, Any]], *, strict_retry: bool = False) -> s
 
 
 def call_gemini(prompt: str, *, cwd: Path, model: str, timeout_seconds: int) -> str:
-    cmd = ["gemini", "--yolo", "--output-format", "json"]
+    executable = shutil.which("gemini")
+    if executable is None:
+        raise RuntimeError("Gemini CLI executable was not found on PATH.")
+    cmd = [executable, "--yolo", "--output-format", "json"]
     if model.strip():
         cmd.extend(["--model", model.strip()])
     cmd.extend(["-p", prompt])
@@ -334,7 +337,8 @@ def main() -> int:
         if args.workspace
         else default_workspace_root()
     )
-    run_dir = ensure_run_dir(workspace_root, f"run_{int(time.time())}_{safe_stem(output_path.stem)}")
+    run_name = f"run_{int(time.time())}_{safe_stem(output_path.stem)}"
+    run_dir = workspace_root / run_name if args.dry_run else ensure_run_dir(workspace_root, run_name)
 
     total_packs = math_ceil_div(len(remaining), pack_size)
     print(json.dumps(
@@ -370,6 +374,7 @@ def main() -> int:
             model=str(args.model),
             timeout_seconds=int(args.timeout_seconds),
         )
+        (pack_dir / "raw_response.txt").write_text(output, encoding="utf-8")
         decisions = parse_decision_array(output) or []
         normalized, missing, duplicates = validate_pack_decisions(decisions, expected)
         if missing or duplicates:
@@ -379,6 +384,7 @@ def main() -> int:
                 model=str(args.model),
                 timeout_seconds=int(args.timeout_seconds),
             )
+            (pack_dir / "raw_response.retry.txt").write_text(output, encoding="utf-8")
             decisions = parse_decision_array(output) or []
             normalized, missing, duplicates = validate_pack_decisions(decisions, expected)
 

@@ -8,3 +8,11 @@ input/
 output/
 output_gemini/
 deepseek_v3_tokenizer.zip
+
+# ride-video-infer generated artifacts
+.gemini_temp_bulk/
+.gemini_temp_pack/
+.ride-video-infer-tmp/
+infer_calib_*/
+gemini_prompt*.txt
+*.frame_decisions.jsonl

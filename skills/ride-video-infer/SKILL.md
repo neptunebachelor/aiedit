@@ -126,6 +126,15 @@ For large jobs, keep the packed comparative loop but checkpoint after every pack
 
 Use this when the user wants Gemini CLI or wants to spend Gemini plan quota through the CLI.
 
+First decide where the skill is running:
+
+- If you are already inside an interactive Gemini CLI chat, do not start another `gemini` process from shell or Python. A nested Gemini CLI commonly opens an interactive approval UI and stalls the run.
+- If you are in a normal shell, Codex, or another non-Gemini host, use the external runner path below. Do not invoke `gemini <image-path> <prompt>` directly; that starts the Gemini CLI TUI instead of a bounded non-interactive request.
+
+### External Runner Path
+
+Use this path only from a normal shell or Codex, not from inside Gemini CLI.
+
 1. Check whether `gemini` is installed and authenticated:
 
 ```powershell
@@ -134,7 +143,53 @@ gemini --version
 ```
 
 2. If unavailable, say so and fall back to Codex-in-the-loop or the existing Gemini API provider.
-3. Prefer the non-nested pack workflow. The current Gemini CLI session must perform the visual inference directly. Do not launch another `gemini` process from Python or shell.
+3. Run the checkpointed non-interactive runner:
+
+```powershell
+python <skill_dir>/scripts/run_gemini_packed.py --index <extract/index.json> --pack-size 20 --model gemini-2.5-flash-lite --apply
+```
+
+The runner copies pack images into an ASCII workspace, references them with Gemini CLI `@images/...` file attachments, requests strict JSON, writes raw Gemini output beside each pack for debugging, appends normalized JSONL decisions, and can call `apply_decisions.py` with `--apply`.
+
+For calibration, start small:
+
+```powershell
+python <skill_dir>/scripts/run_gemini_packed.py --index <extract/index.json> --pack-size 5 --max-frames 20 --model gemini-2.5-flash-lite
+```
+
+Do not use a bare manual test such as:
+
+```powershell
+gemini "C:\path\to\frame.jpg" "Describe this image."
+```
+
+Use non-interactive `-p` plus an `@` file reference instead:
+
+```powershell
+gemini --yolo --output-format json -p "Describe this image briefly: @C:/path/to/frame.jpg"
+```
+
+### In-Session Gemini CLI Path
+
+Use this path only when you are already inside Gemini CLI and the current chat session itself can inspect image inputs.
+
+1. Prefer the non-nested pack workflow. The current Gemini CLI session must perform the visual inference directly. Do not launch another `gemini` process from Python or shell.
+2. Keep the user prompt short and stable. The detailed scoring, validation, and file-writing rules belong in this skill, not in each test prompt.
+3. Generate repeatable in-session prompts with:
+
+```powershell
+python <skill_dir>/scripts/build_gemini_in_session_prompt.py --packs-dir <video_dir>/infer/packs --start-pack 1 --end-pack 3
+```
+
+The generated prompt is the only text that should be pasted into Gemini CLI for that range. For the same arguments and paths, it must be byte-for-byte stable.
+
+For pack-size calibration, generate and paste one pack per prompt by setting `--start-pack` and `--end-pack` to the same pack number. A range prompt includes every image in the requested range, so `--start-pack 1 --end-pack 2` for 26-frame packs attaches 52 images and does not test a 26-image single-request pack.
+
+When Gemini receives the generated prompt, it must execute this skill's `Gemini In-Session Pack Inference Contract`.
+
+### Gemini In-Session Pack Inference Contract
+
+This contract is the canonical prompt body for in-session Gemini CLI pack inference. Do not duplicate it into ad hoc test prompts.
 
 Prepare packs:
 
@@ -145,9 +200,24 @@ python <skill_dir>/scripts/prepare_packs.py --index <extract/index.json> --pack-
 For each prepared pack:
 
 - Read `manifest.json`.
+- Use the pack's `manifest.json` as the source of truth for expected frame numbers, timestamps, image paths, and output location.
 - Read every file under the pack's `images/` directory as separate image inputs.
 - Compare the frames in the current Gemini CLI session.
 - Write `response.json` directly in that pack directory as UTF-8 without BOM.
+- Write a top-level JSON array only. Do not include Markdown, commentary, code fences, or response envelopes.
+- Include exactly one object for every `frame_number` in the pack manifest, with no missing, extra, or duplicate frame numbers.
+- Use this object schema: `frame_number`, `keep`, `score`, `labels`, `reason`, `discard_reason`.
+- `score` must be a number from `0.0` to `1.0`; `labels` must be an array of short strings.
+- Set `keep` to exactly match the score threshold: `keep` must be `true` when `score >= 0.65`, and `false` when `score < 0.65`.
+- In an ordinary 20-frame pack, keep only the strongest 1-4 frames unless many frames are genuinely strong.
+- Keep `reason` and `discard_reason` short and plain.
+- After writing all `response.json` files for the requested range, run the BOM cleanup script for that exact range before validation:
+
+```powershell
+python <skill_dir>/scripts/strip_response_bom.py --packs-dir <video_dir>/infer/packs --start-pack 1 --end-pack 5
+```
+
+  This script only removes the leading UTF-8 BOM bytes (`EF BB BF`) from `response.json` files; it does not change the JSON decisions. Running this Python script is allowed inside Gemini CLI because it does not launch another Gemini model process.
 - Do not write temporary Python scripts containing decisions.
 - Do not write decisions through PowerShell string literals when paths contain non-ASCII characters; use Python `json.dump(..., ensure_ascii=False, indent=2)` when a file write is needed.
 
@@ -165,14 +235,18 @@ python <skill_dir>/scripts/apply_decisions.py --index <extract/index.json> --dec
 
 The older `run_gemini_packed.py` runner is only for running from a normal shell outside Gemini CLI. Do not run it inside Gemini CLI because it launches another Gemini CLI process.
 
-4. Select the model deliberately:
+If the current Gemini CLI session cannot inspect local image files directly, stop and tell the user to run the External Runner Path from a normal shell instead of attempting a nested `gemini` command.
+
+### Model Selection And Output Rules
+
+1. Select the model deliberately:
    - Use `--model flash-lite` for the cheapest/highest-throughput rough highlight scoring when it is available in the user's plan.
    - Use `--model flash` when flash-lite is too noisy on a short calibration sample.
    - Avoid `--model pro` for bulk frame scoring unless the user asks for quality over quota.
    - Use `--model auto` only when the user wants Gemini CLI to spend the plan quota opportunistically across available models.
-5. For each pack, call Gemini CLI non-interactively and ask for strict JSON only. Include separate image inputs plus per-image `frame_number` and timestamp metadata. Never use a contact sheet unless the user explicitly asks.
-6. Parse stdout carefully. If the CLI wraps output in a JSON event or response envelope, extract the model text first, then parse the inner decision JSON.
-7. Write normalized JSONL and run `apply_decisions.py --provider gemini_cli`.
+2. For each pack, ask for strict JSON only. Include separate image inputs plus per-image `frame_number` and timestamp metadata. Never use a contact sheet unless the user explicitly asks.
+3. Parse stdout or `response.json` carefully. If the CLI wraps output in a JSON event or response envelope, extract the model text first, then parse the inner decision JSON.
+4. Write normalized JSONL and run `apply_decisions.py --provider gemini_cli`.
 
 For plan-quota runs, count one packed group as one model request. Check current usage with Gemini CLI stats when possible and stop gracefully before exhausting the user's preferred model quota.
 
