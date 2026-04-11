@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ride Video Infer"
+  short_description: "Infer motorcycle highlight frames with Codex or Gemini CLI."
+  default_prompt: "Use this skill to extract candidate frames, run visual inference with Codex or Gemini CLI, and produce pipeline-compatible analysis artifacts."
