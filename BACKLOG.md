@@ -95,3 +95,23 @@ Suggested visibility:
 - current variant index
 - current sub-step such as `build_review_outputs`, `render_preview`, or `completed`
 - optional machine-readable progress snapshot file for UI or resume diagnostics
+
+### 5. Instrument Gemini CLI image input handling for calibration
+
+Current behavior:
+
+- `ride-video-infer` can verify that prepared pack images are byte-identical copies of extracted frames
+- validation can prove response shape, duplicate/missing frames, BOM cleanup, and `keep`/score consistency
+- validation cannot prove how Gemini CLI or the Gemini backend internally handles `@image` inputs after upload
+
+Open issue:
+
+- determine whether Gemini CLI sends all `@image` inputs in one backend model request or splits/uploads/caches them behind the scenes
+- determine what image preprocessing happens inside Gemini for these requests, including tile sizing, downscaling, or media-resolution defaults
+- avoid treating local byte-identical image copies as proof that Gemini consumed full-resolution images internally
+
+Requested change:
+
+- add an explicit calibration/instrumentation path using either Gemini API `count_tokens`/usage metadata or Gemini CLI debug logs
+- report the actual number of images attached per prompt, prompt token/image token usage when available, and any configured media-resolution behavior
+- keep pack-size calibration prompts one pack per prompt by default so a 26-frame calibration actually tests 26 image references, not a multi-pack range
