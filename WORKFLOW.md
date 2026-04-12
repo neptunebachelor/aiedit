@@ -69,10 +69,13 @@ python pipeline.py extract --video ./input/lap01.mp4 --config ./config.track.tom
 Outputs:
 
 ```text
-<source_video_dir>/<video_stem>/
-`-- extract/
-    |-- frames/
-    `-- index.json
+.video_data/
+|-- frames/
+|   `-- <video_slug>/
+`-- videos/
+    `-- <video_slug>/
+        `-- extract/
+            `-- index.json
 ```
 
 `index.json` contains:
@@ -152,7 +155,10 @@ python pipeline.py collect \
 Outputs:
 
 ```text
-<source_video_dir>/<video_stem>/
+.video_data/videos/<video_slug>/
+|-- infer/
+|   |-- infer.progress.json
+|   `-- frame_decisions.checkpoint.jsonl
 |-- analysis.json
 |-- frame_decisions.jsonl
 |-- segments.raw.json
@@ -189,7 +195,7 @@ python pipeline.py temporal \
 Outputs:
 
 ```text
-<source_video_dir>/<video_stem>/
+.video_data/videos/<video_slug>/
 |-- candidate_segments.json
 |-- temporal_windows.json
 |-- highlight.final.json
@@ -230,7 +236,7 @@ Example:
 
 ```bash
 python pipeline.py review \
-  --input ./input/lap01/analysis.json \
+  --input ./.video_data/videos/lap01/analysis.json \
   --target-seconds 30 \
   --caption-mode human \
   --preview \
@@ -240,7 +246,7 @@ python pipeline.py review \
 Outputs:
 
 ```text
-<source_video_dir>/<video_stem>/
+.video_data/videos/<video_slug>/
 |-- highlights_30s.review.json
 |-- highlights_30s.editable.json
 |-- highlights_30s.final.srt
@@ -279,14 +285,14 @@ Examples:
 
 ```bash
 python pipeline.py render \
-  --input ./input/lap01/highlights_30s.editable.json \
+  --input ./.video_data/videos/lap01/highlights_30s.editable.json \
   --stem lap01_final \
   --resolution source
 ```
 
 ```bash
 python pipeline.py render \
-  --input ./input/lap01/highlights_30s.editable.json \
+  --input ./.video_data/videos/lap01/highlights_30s.editable.json \
   --stem lap01_final_720p \
   --resolution 720p
 ```
@@ -294,7 +300,7 @@ python pipeline.py render \
 Outputs:
 
 ```text
-<source_video_dir>/<video_stem>/
+.video_data/videos/<video_slug>/
 |-- lap01_final.json
 |-- lap01_final.final.srt
 |-- lap01_final.source.srt

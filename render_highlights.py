@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from video_data_paths import artifact_dir_from_payload
+
 
 def format_srt_timestamp(seconds: float) -> str:
     total_ms = max(0, int(round(seconds * 1000)))
@@ -209,10 +211,8 @@ def load_payload(input_path: Path, source_override: str | None) -> dict[str, Any
 def resolve_output_dir(input_path: Path, payload: dict[str, Any], output_override: str | None) -> Path:
     if output_override:
         return Path(output_override).expanduser().resolve()
-    source_path_text = str(payload.get("video", {}).get("source_path", "")).strip()
-    if source_path_text:
-        source_path = Path(source_path_text).expanduser().resolve()
-        return source_path.parent / source_path.stem
+    if payload:
+        return artifact_dir_from_payload(payload, fallback=input_path.parent)
     return input_path.parent
 
 

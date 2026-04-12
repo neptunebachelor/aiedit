@@ -21,23 +21,24 @@ Default to comparative packed inference: send multiple candidate frame images as
 ## Shared Workflow
 
 1. Work from the project root containing `pipeline.py`.
-2. Ensure candidate frames exist:
+2. Treat the repo-local data root as canonical: `<repo_root>/.video_data`. For a source video, pipeline artifacts live under `<repo_root>/.video_data/videos/<video_slug>/`, extracted frame images live under `<repo_root>/.video_data/frames/<video_slug>/`, and skill inference details live under `<repo_root>/.video_data/videos/<video_slug>/infer/`.
+3. Ensure candidate frames exist:
 
 ```powershell
 python pipeline.py extract --video <video> --config <config>
 ```
 
-   If the user gives an existing `extract/index.json`, use it directly.
+   If the user gives an existing `extract/index.json`, use it directly. The apply/materialization scripts will still write derived outputs to the canonical `.video_data` artifact directory for that video.
 
-3. Read the extract index and inspect only frames where `candidate` is true and `image_path` is non-empty.
-4. Process frames in deterministic order by `frame_number` unless resuming from an existing decisions file. Skip frames already present in the decisions file/checkpoint. In comparative mode, pack consecutive candidate frames into groups.
-5. Produce one decision per candidate frame in JSONL. Each line must include `frame_number` and the decision schema:
+4. Read the extract index and inspect only frames where `candidate` is true and `image_path` is non-empty. If an older index points at the original external video tree, resolve frame basenames from `.video_data/frames/<video_slug>/` or `.video_data/frames/` before failing.
+5. Process frames in deterministic order by `frame_number` unless resuming from an existing decisions file. Skip frames already present in the decisions file/checkpoint. In comparative mode, pack consecutive candidate frames into groups.
+6. Produce one decision per candidate frame in JSONL. Each line must include `frame_number` and the decision schema:
 
 ```json
 {"frame_number": 0, "keep": false, "score": 0.1, "labels": [], "reason": "low editorial value", "discard_reason": "pit or waiting area"}
 ```
 
-6. Materialize project outputs with:
+7. Materialize project outputs with:
 
 ```powershell
 python skills/ride-video-infer/scripts/apply_decisions.py --index <extract/index.json> --decisions <decisions.jsonl> --config <config> --provider codex
@@ -117,7 +118,7 @@ Use this when the user says to let Codex infer the frames.
 1. Read `extract/index.json`.
 2. Iterate over candidate frames in ascending `frame_number` order, using comparative packs by default.
 3. Inspect images as separate image inputs. Do not combine them into a single contact sheet.
-4. Append one JSONL decision per frame immediately under the video's output directory, for example `codex.frame_decisions.jsonl`.
+4. Append one JSONL decision per frame under the video's canonical infer directory, for example `<repo_root>/.video_data/videos/<video_slug>/infer/codex.frame_decisions.jsonl`.
 5. Run `apply_decisions.py` to generate `analysis.json`, `segments.raw.json`, SRTs, and `frame_decisions.jsonl`.
 
 For large jobs, keep the packed comparative loop but checkpoint after every pack. Do not spend visual effort on non-candidate frames unless the user asks for audit/debugging.
@@ -178,7 +179,7 @@ Use this path only when you are already inside Gemini CLI and the current chat s
 3. Generate repeatable in-session prompts with:
 
 ```powershell
-python <skill_dir>/scripts/build_gemini_in_session_prompt.py --packs-dir <video_dir>/infer/packs --start-pack 1 --end-pack 3
+python <skill_dir>/scripts/build_gemini_in_session_prompt.py --packs-dir <repo_root>/.video_data/videos/<video_slug>/infer/packs --start-pack 1 --end-pack 3
 ```
 
 The generated prompt is the only text that should be pasted into Gemini CLI for that range. For the same arguments and paths, it must be byte-for-byte stable.
@@ -214,7 +215,7 @@ For each prepared pack:
 - After writing all `response.json` files for the requested range, run the BOM cleanup script for that exact range before validation:
 
 ```powershell
-python <skill_dir>/scripts/strip_response_bom.py --packs-dir <video_dir>/infer/packs --start-pack 1 --end-pack 5
+python <skill_dir>/scripts/strip_response_bom.py --packs-dir <repo_root>/.video_data/videos/<video_slug>/infer/packs --start-pack 1 --end-pack 5
 ```
 
   This script only removes the leading UTF-8 BOM bytes (`EF BB BF`) from `response.json` files; it does not change the JSON decisions. Running this Python script is allowed inside Gemini CLI because it does not launch another Gemini model process.
@@ -224,18 +225,73 @@ python <skill_dir>/scripts/strip_response_bom.py --packs-dir <video_dir>/infer/p
 Validate and optionally append valid decisions:
 
 ```powershell
-python <skill_dir>/scripts/validate_pack_response.py --packs-dir <video_dir>/infer/packs --start-pack 1 --end-pack 5 --append-decisions <video_dir>/infer/gemini_cli.frame_decisions.jsonl
+python <skill_dir>/scripts/validate_pack_response.py --packs-dir <repo_root>/.video_data/videos/<video_slug>/infer/packs --start-pack 1 --end-pack 5 --append-decisions <repo_root>/.video_data/videos/<video_slug>/infer/gemini_cli.frame_decisions.jsonl
 ```
 
 After all packs are valid, materialize project outputs:
 
 ```powershell
-python <skill_dir>/scripts/apply_decisions.py --index <extract/index.json> --decisions <video_dir>/infer/gemini_cli.frame_decisions.jsonl --provider gemini_cli
+python <skill_dir>/scripts/apply_decisions.py --index <extract/index.json> --decisions <repo_root>/.video_data/videos/<video_slug>/infer/gemini_cli.frame_decisions.jsonl --provider gemini_cli
 ```
 
 The older `run_gemini_packed.py` runner is only for running from a normal shell outside Gemini CLI. Do not run it inside Gemini CLI because it launches another Gemini CLI process.
 
 If the current Gemini CLI session cannot inspect local image files directly, stop and tell the user to run the External Runner Path from a normal shell instead of attempting a nested `gemini` command.
+
+## File API Packed Inference
+
+Use this path when the user wants Codex or Gemini tooling to control tests while the model reads previously uploaded image files by provider file reference. This is different from the Gemini CLI `@local/image.jpg` workflow and different from the pipeline's async JSONL batch upload. Here, every extracted screenshot is uploaded first, then comparative packed inference references provider file IDs or URIs.
+
+File API mode is a checked-in-script-only workflow:
+
+- Do not create ad hoc test scripts such as `gemini_file_api_test.py`.
+- Codex must not generate wrapper scripts in the repository root, the video directory, or `.gemini/tmp`.
+- Do not create `.gemini/tmp` runner files for File API mode.
+- Do not spawn the Gemini CLI, `node`, or any Gemini/node subprocess from File API mode.
+- Use only these checked-in scripts for File API runs: `upload_frame_files.py` and `run_file_api_packed.py`.
+
+Default behavior:
+
+- Upload frames from `extract/index.json` with `candidate=true` and `image_path` by default.
+- Use `--include all` during upload only when the user explicitly asks to upload every screenshot file with `image_path`.
+- Inference still uses candidate frames by default, even when the upload manifest includes all frames. Pass `--include-all-frames` to `run_file_api_packed.py` only when the user explicitly asks for an all-frame inference test or audit.
+- Keep one file upload manifest per provider under `<repo_root>/.video_data/videos/<video_slug>/infer/file_uploads.<provider>.json`.
+- Keep one inference decisions file per provider under `<repo_root>/.video_data/videos/<video_slug>/infer/<provider>_file_api.frame_decisions.jsonl`.
+
+Upload file references:
+
+```powershell
+python <skill_dir>/scripts/upload_frame_files.py --index <extract/index.json> --provider openai --reuse
+python <skill_dir>/scripts/upload_frame_files.py --index <extract/index.json> --provider gemini --reuse
+```
+
+For an explicit all-frame test only, use `--include all` during upload and `--include-all-frames` during inference.
+
+For OpenAI, upload images with the Files API using `purpose="vision"` and reference each image in the Responses API as an `input_image` with `file_id`. For Gemini, upload images with the Gemini Files API and reference each image by `file_uri` plus MIME type in `generateContent`.
+
+Run controlled packed inference:
+
+```powershell
+python <skill_dir>/scripts/run_file_api_packed.py --upload-manifest <repo_root>/.video_data/videos/<video_slug>/infer/file_uploads.openai.json --provider openai --model gpt-4.1-mini --pack-size 5 --max-frames 20 --prompt-variant calibration --dry-run
+python <skill_dir>/scripts/run_file_api_packed.py --upload-manifest <repo_root>/.video_data/videos/<video_slug>/infer/file_uploads.openai.json --provider openai --model gpt-4.1-mini --pack-size 5 --max-frames 20 --prompt-variant calibration --apply
+```
+
+Use the same shape for Gemini:
+
+```powershell
+python <skill_dir>/scripts/run_file_api_packed.py --upload-manifest <repo_root>/.video_data/videos/<video_slug>/infer/file_uploads.gemini.json --provider gemini --model gemini-2.5-flash-lite --pack-size 5 --max-frames 20 --prompt-variant calibration --apply
+```
+
+The runner writes `run_manifest.json` and per-pack raw responses under `<repo_root>/.video_data/videos/<video_slug>/infer/file_api_runs/`. The run manifest must record all controlled variables: provider, model, pack size, pack range, max frames, prompt variant, temperature, minimum keep score, retry policy, candidate frame numbers, `upload_manifest_hash`, and `prompt_hash`.
+
+File API prompt discipline:
+
+- Start with calibration: `--pack-size 5 --max-frames 20 --prompt-variant calibration`.
+- Then run the normal pass: `--pack-size 20` with the same model, temperature, and prompt variant.
+- Use a larger pack size only after dry-run planning and calibration responses validate.
+- Change one variable per test round. If testing model quality, keep pack size, prompt variant, temperature, frame range, and upload manifest fixed. If testing pack size, keep model, prompt variant, temperature, frame range, and upload manifest fixed.
+- The prompt must require one JSON object for every listed `frame_number`, no markdown, no comments, no code fences, and keys `frame_number`, `keep`, `score`, `labels`, `reason`, `discard_reason`.
+- If a pack response is malformed, missing frames, or duplicates frames, retry once with the strict retry prompt. If still invalid, write valid reject decisions with `discard_reason` beginning `skill_error:` so downstream stages remain usable.
 
 ### Model Selection And Output Rules
 
@@ -258,7 +314,7 @@ When running inside Gemini CLI:
 - After each range, run `validate_pack_response.py` and stop if any pack is invalid.
 - Never claim a pack is complete unless `response.json` exists and validation passes.
 - Prepared packs with only `manifest.json` and `images/` are not inferred yet.
-- Keep all business artifacts under `<video_dir>/infer`, not under the repository root or `.gemini/tmp`.
+- Keep all business artifacts under `<repo_root>/.video_data/videos/<video_slug>/infer`, not under the repository root, the original external video directory, or `.gemini/tmp`.
 - Do not create one-off files such as `write_batch_responses.py` in the project root.
 
 ## Output Contract

@@ -7,8 +7,22 @@ import argparse
 import json
 import math
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
+
+
+def find_repo_root(start: Path) -> Path:
+    for candidate in [start, *start.parents]:
+        if (candidate / "pipeline.py").exists():
+            return candidate
+    raise RuntimeError("Could not find project root containing pipeline.py")
+
+
+REPO_ROOT = find_repo_root(Path(__file__).resolve())
+sys.path.insert(0, str(REPO_ROOT))
+
+from video_data_paths import infer_dir_from_index, resolve_frame_image_path  # noqa: E402
 
 
 def load_candidate_frames(index_path: Path) -> list[dict[str, Any]]:
@@ -25,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare Gemini visual-inference packs without calling Gemini.")
     parser.add_argument("--index", required=True, help="Path to extract/index.json")
     parser.add_argument("--pack-size", type=int, default=20, help="Candidate frames per pack")
-    parser.add_argument("--output-dir", help="Infer directory. Defaults to <video_dir>/infer")
+    parser.add_argument("--output-dir", help="Infer directory. Defaults to the canonical .video_data video infer directory")
     parser.add_argument("--start-pack", type=int, default=1, help="First 1-based pack number to prepare")
     parser.add_argument("--end-pack", type=int, default=0, help="Last 1-based pack number to prepare, inclusive")
     parser.add_argument("--max-frames", type=int, default=0, help="Optional candidate frame limit for calibration")
@@ -36,14 +50,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     index_path = Path(args.index).expanduser().resolve()
-    candidate_frames = load_candidate_frames(index_path)
+    index_payload = json.loads(index_path.read_text(encoding="utf-8"))
+    candidate_frames = [frame for frame in index_payload["frames"] if frame.get("candidate") and frame.get("image_path")]
     if args.max_frames > 0:
         candidate_frames = candidate_frames[: int(args.max_frames)]
     pack_size = max(1, int(args.pack_size))
     total_packs = math.ceil(len(candidate_frames) / pack_size) if candidate_frames else 0
     start_pack = max(1, int(args.start_pack))
     end_pack = int(args.end_pack) if int(args.end_pack) > 0 else total_packs
-    infer_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else index_path.parent.parent / "infer"
+    infer_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else infer_dir_from_index(index_path)
     packs_dir = infer_dir / "packs"
     prepared: list[dict[str, Any]] = []
 
@@ -69,7 +84,7 @@ def main() -> int:
         images_dir.mkdir(parents=True, exist_ok=True)
         manifest_frames: list[dict[str, Any]] = []
         for frame in pack_frames:
-            source_path = Path(str(frame["image_path"])).expanduser().resolve()
+            source_path = resolve_frame_image_path(frame, index_path=index_path, payload=index_payload)
             suffix = source_path.suffix or ".jpg"
             frame_number = int(frame["frame_number"])
             copied_path = images_dir / f"frame_{frame_number:09d}{suffix.lower()}"

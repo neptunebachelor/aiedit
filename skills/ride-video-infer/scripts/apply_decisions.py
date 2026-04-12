@@ -53,7 +53,7 @@ def main() -> int:
     args = parse_args()
     index_path = Path(args.index).expanduser().resolve()
     decisions_path = Path(args.decisions).expanduser().resolve()
-    repo_root = find_repo_root(index_path.parent)
+    repo_root = find_repo_root(Path(__file__).resolve())
     sys.path.insert(0, str(repo_root))
 
     import pipeline  # pylint: disable=import-error,import-outside-toplevel

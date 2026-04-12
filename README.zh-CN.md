@@ -174,7 +174,7 @@ python pipeline.py render \
 
 ### 中途更换模型并继续推理
 
-`infer` 阶段会把已完成帧写入 `<source_video_dir>/<video>/frame_decisions.checkpoint.jsonl`。同一个视频再次执行 `infer` 时会自动跳过已完成帧，只处理剩余帧，所以你可以中途换模型继续跑：
+`infer` 阶段会把已完成帧写入 `<repo_root>/.video_data/videos/<video_slug>/infer/frame_decisions.checkpoint.jsonl`。同一个视频再次执行 `infer` 时会自动跳过已完成帧，只处理剩余帧，所以你可以中途换模型继续跑：
 
 ```bash
 python pipeline.py infer --video ./input/lap01.mp4 --provider api --model gpt-4.1-mini

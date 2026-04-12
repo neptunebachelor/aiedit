@@ -56,7 +56,7 @@ GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
 
 ## Quick Start
 
-By default, per-video artifacts are written beside the source video in a sibling folder named after the video stem, for example `./input/lap01/`. Use `--output-root` if you want to override that.
+By default, video-processing artifacts are written under the repo-local data root, `<repo_root>/.video_data`. Use `--output-root` only when you intentionally want a different artifact root.
 
 ### 1. Extract frames
 
@@ -291,20 +291,27 @@ Key user-facing knobs:
 Typical stage outputs look like this:
 
 ```text
-input/lap01/
-|-- extract/
-|   |-- frames/
-|   `-- index.json
-|-- analysis.json
-|-- frame_decisions.jsonl
-|-- segments.raw.json
-|-- segments.raw.srt
-|-- highlights_30s.review.json
-|-- highlights_30s.editable.json
-|-- highlights_30s.final.srt
-|-- highlights_30s.source.srt
-|-- highlights_30s.preview.mp4
-`-- lap01_final.mp4
+.video_data/
+|-- frames/
+|   `-- lap01/
+|       `-- 00000_000.jpg
+`-- videos/
+    `-- lap01/
+        |-- extract/
+        |   `-- index.json
+        |-- infer/
+        |   |-- infer.progress.json
+        |   `-- frame_decisions.checkpoint.jsonl
+        |-- analysis.json
+        |-- frame_decisions.jsonl
+        |-- segments.raw.json
+        |-- segments.raw.srt
+        |-- highlights_30s.review.json
+        |-- highlights_30s.editable.json
+        |-- highlights_30s.final.srt
+        |-- highlights_30s.source.srt
+        |-- highlights_30s.preview.mp4
+        `-- lap01_final.mp4
 ```
 
 ## FastAPI backend (realtime job API)

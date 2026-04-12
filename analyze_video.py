@@ -18,6 +18,8 @@ import requests
 import tomllib
 from tqdm import tqdm
 
+from video_data_paths import resolve_video_data_root, safe_video_slug
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "project": {
@@ -118,7 +120,7 @@ class FrameMetrics:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze front-facing videos with a local Ollama vision model.")
     parser.add_argument("--input", help="Video file or folder. Defaults to config.project.input")
-    parser.add_argument("--output", help="Output folder override. Defaults to a sibling folder beside each source video.")
+    parser.add_argument("--output", help="Output folder override. Defaults to repo-local .video_data/videos.")
     parser.add_argument("--config", default="config.toml", help="TOML config path")
     parser.add_argument("--extract-only", action="store_true", help="Skip Ollama and export frame candidates only")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -434,7 +436,7 @@ def analyze_video(video_path: Path, output_root: Path, config: dict[str, Any], e
     frame_step = max(1, int(round(fps / sample_fps))) if sample_fps > 0 else 1
     max_frames = int(config["sampling"]["max_frames"])
 
-    video_output = output_root / video_path.stem
+    video_output = output_root / safe_video_slug(video_path)
     video_output.mkdir(parents=True, exist_ok=True)
     thumbnails_dir = video_output / str(config["project"]["thumbnail_dirname"])
 
@@ -543,7 +545,7 @@ def main() -> int:
 
     for video_path in videos:
         logging.info("Analyzing %s", video_path)
-        video_output_root = output_path or video_path.parent.resolve()
+        video_output_root = output_path or (resolve_video_data_root() / "videos")
         analysis = analyze_video(video_path, video_output_root, config, args.extract_only)
         logging.info(
             "Finished %s | segments=%s | duration=%.1fs",

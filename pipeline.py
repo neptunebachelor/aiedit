@@ -59,6 +59,16 @@ from render_highlights import (
     render_video,
     select_candidates,
 )
+from video_data_paths import (
+    artifact_dir_from_index,
+    artifact_dir_from_payload,
+    infer_dir_from_index,
+    resolve_frame_image_path,
+    resolve_video_data_root,
+    safe_video_slug,
+    video_artifact_dir,
+    video_frames_dir,
+)
 
 
 DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
@@ -512,8 +522,19 @@ class OpenAICompatibleBatchVisionProvider(OpenAICompatibleVisionProvider):
         super().__init__(**kwargs)
         self.route_name = route_name
 
-    def _build_request_record(self, frame: dict[str, Any], *, prompt_snapshot: dict[str, Any]) -> dict[str, Any]:
-        image_path = Path(str(frame["image_path"])).expanduser().resolve()
+    def _build_request_record(
+        self,
+        frame: dict[str, Any],
+        *,
+        prompt_snapshot: dict[str, Any],
+        index_path: Path | None = None,
+        extract_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        image_path = (
+            resolve_frame_image_path(frame, index_path=index_path, payload=extract_payload)
+            if index_path is not None or extract_payload is not None
+            else Path(str(frame["image_path"])).expanduser().resolve()
+        )
         image_bytes = image_path.read_bytes()
         request = self.build_chat_payload(
             image_bytes,
@@ -567,7 +588,7 @@ class OpenAICompatibleBatchVisionProvider(OpenAICompatibleVisionProvider):
         if not candidate_frames:
             raise ValueError(f"No candidate frames found in {index_path}")
 
-        video_output_dir = index_path.parent.parent
+        video_output_dir = resolve_video_dir_for_index(index_path, payload)
         manifest_path = video_output_dir / "analysis.batch.json"
         if manifest_path.exists() and not force_resubmit:
             existing = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -583,7 +604,12 @@ class OpenAICompatibleBatchVisionProvider(OpenAICompatibleVisionProvider):
             for frame in candidate_frames:
                 handle.write(
                     json.dumps(
-                        self._build_request_record(frame, prompt_snapshot=prompt_snapshot),
+                        self._build_request_record(
+                            frame,
+                            prompt_snapshot=prompt_snapshot,
+                            index_path=index_path,
+                            extract_payload=payload,
+                        ),
                         ensure_ascii=False,
                     )
                     + "\n"
@@ -704,8 +730,19 @@ class GeminiBatchVisionProvider:
         self.temperature = temperature
         self.timeout_seconds = timeout_seconds
 
-    def _build_request_record(self, frame: dict[str, Any], *, prompt_snapshot: dict[str, Any]) -> dict[str, Any]:
-        image_path = Path(str(frame["image_path"])).expanduser().resolve()
+    def _build_request_record(
+        self,
+        frame: dict[str, Any],
+        *,
+        prompt_snapshot: dict[str, Any],
+        index_path: Path | None = None,
+        extract_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        image_path = (
+            resolve_frame_image_path(frame, index_path=index_path, payload=extract_payload)
+            if index_path is not None or extract_payload is not None
+            else Path(str(frame["image_path"])).expanduser().resolve()
+        )
         image_bytes = image_path.read_bytes()
         request: dict[str, Any] = {
             "system_instruction": {
@@ -818,7 +855,7 @@ class GeminiBatchVisionProvider:
         if not candidate_frames:
             raise ValueError(f"No candidate frames found in {index_path}")
 
-        video_output_dir = index_path.parent.parent
+        video_output_dir = resolve_video_dir_for_index(index_path, payload)
         manifest_path = video_output_dir / "analysis.batch.json"
         if manifest_path.exists() and not force_resubmit:
             existing = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -834,7 +871,12 @@ class GeminiBatchVisionProvider:
             for frame in candidate_frames:
                 handle.write(
                     json.dumps(
-                        self._build_request_record(frame, prompt_snapshot=prompt_snapshot),
+                        self._build_request_record(
+                            frame,
+                            prompt_snapshot=prompt_snapshot,
+                            index_path=index_path,
+                            extract_payload=payload,
+                        ),
                         ensure_ascii=False,
                     )
                     + "\n"
@@ -1211,7 +1253,7 @@ def parse_args() -> argparse.Namespace:
 
 def add_common_video_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--video", required=True, help="Video file or folder.")
-    parser.add_argument("--output-root", help="Root directory for pipeline outputs. Defaults to each source video's parent directory.")
+    parser.add_argument("--output-root", help="Root directory for pipeline outputs. Defaults to repo-local .video_data.")
     parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
 
 
@@ -1391,14 +1433,28 @@ def configure_logging(level: str) -> None:
 def resolve_output_root(config: dict[str, Any], override: str | None, video_path: Path | None = None) -> Path:
     if override:
         return Path(override).expanduser().resolve()
-    if video_path is not None:
-        return video_path.parent.resolve()
-    return Path(config["project"]["output"]).expanduser().resolve()
+    return resolve_video_data_root()
 
 
 def resolve_video_output_dir(config: dict[str, Any], override: str | None, video_path: Path) -> Path:
-    output_root = resolve_output_root(config, override, video_path)
-    return output_root / video_path.stem
+    if override:
+        return resolve_output_root(config, override, video_path) / safe_video_slug(video_path)
+    return video_artifact_dir(video_path)
+
+
+def resolve_extract_frames_dir(video_path: Path, output_root: Path) -> Path:
+    data_videos_root = resolve_video_data_root() / "videos"
+    try:
+        output_root.resolve().relative_to(data_videos_root.resolve())
+        return video_frames_dir(video_path)
+    except ValueError:
+        return output_root / safe_video_slug(video_path) / "extract" / "frames"
+
+
+def resolve_video_dir_for_index(index_path: Path, payload: dict[str, Any] | None = None) -> Path:
+    if payload:
+        return artifact_dir_from_payload(payload, fallback=index_path.parent.parent)
+    return artifact_dir_from_index(index_path)
 
 
 def resolve_stage_output_dir(
@@ -1409,10 +1465,7 @@ def resolve_stage_output_dir(
     if output_override:
         return Path(output_override).expanduser().resolve()
     if payload:
-        source_path_text = str(payload.get("video", {}).get("source_path", "")).strip()
-        if source_path_text:
-            source_path = Path(source_path_text).expanduser().resolve()
-            return source_path.parent / source_path.stem
+        return artifact_dir_from_payload(payload, fallback=input_path.parent)
     return input_path.parent
 
 
@@ -1544,10 +1597,11 @@ def extract_candidates_for_video(
     ffmpeg_override: str | None = None,
 ) -> Path:
     video_meta = probe_video(video_path)
-    video_output_dir = output_root / video_path.stem
+    video_output_dir = output_root / safe_video_slug(video_path)
     extract_dir = video_output_dir / "extract"
-    frames_dir = extract_dir / "frames"
+    frames_dir = resolve_extract_frames_dir(video_path, output_root)
     extract_dir.mkdir(parents=True, exist_ok=True)
+    frames_dir.mkdir(parents=True, exist_ok=True)
     frame_step, sample_indices = sample_frame_numbers(video_meta, frame_interval_seconds, max_frames)
 
     gate_config = {
@@ -1679,6 +1733,9 @@ def extract_candidates_for_video(
     payload = {
         "stage": "extract",
         "video": video_meta.__dict__,
+        "artifact_dir": str(video_output_dir.resolve()),
+        "frames_dir": str(frames_dir.resolve()),
+        "data_root": str(resolve_video_data_root()),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "config_snapshot": {
             "extract": {
@@ -2158,11 +2215,11 @@ def build_infer_records(
 
 
 def checkpoint_path_for_index(index_path: Path) -> Path:
-    return index_path.parent.parent / "frame_decisions.checkpoint.jsonl"
+    return infer_dir_from_index(index_path) / "frame_decisions.checkpoint.jsonl"
 
 
 def progress_path_for_index(index_path: Path) -> Path:
-    return index_path.parent.parent / "infer.progress.json"
+    return infer_dir_from_index(index_path) / "infer.progress.json"
 
 
 def review_progress_path_for_output_dir(output_dir: Path) -> Path:
@@ -2212,10 +2269,12 @@ def build_decision_record(frame: dict[str, Any], decision: dict[str, Any]) -> di
 
 def load_checkpoint_decisions(index_path: Path) -> dict[int, dict[str, Any]]:
     checkpoint_path = checkpoint_path_for_index(index_path)
-    if not checkpoint_path.exists():
+    legacy_checkpoint_path = index_path.parent.parent / "frame_decisions.checkpoint.jsonl"
+    source_path = checkpoint_path if checkpoint_path.exists() else legacy_checkpoint_path
+    if not source_path.exists():
         return {}
     decisions_by_frame_number: dict[int, dict[str, Any]] = {}
-    with checkpoint_path.open("r", encoding="utf-8") as handle:
+    with source_path.open("r", encoding="utf-8") as handle:
         for raw_line in handle:
             line = raw_line.strip()
             if not line:
@@ -2262,6 +2321,7 @@ def write_sync_progress(
         "error": str(error).strip(),
     }
     progress_path = progress_path_for_index(index_path)
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
     progress_path.write_text(json.dumps(progress_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return progress_path
 
@@ -2276,8 +2336,12 @@ def write_infer_outputs(
     decisions_by_frame_number: dict[int, dict[str, Any]],
 ) -> Path:
     video_info = dict(extract_payload["video"])
-    video_output_dir = index_path.parent.parent
-    records = build_infer_records(extract_payload, decisions_by_frame_number=decisions_by_frame_number)
+    video_output_dir = resolve_video_dir_for_index(index_path, extract_payload)
+    normalized_payload = copy.deepcopy(extract_payload)
+    for frame in normalized_payload.get("frames", []):
+        if isinstance(frame, dict) and frame.get("image_path"):
+            frame["image_path"] = str(resolve_frame_image_path(frame, index_path=index_path, payload=normalized_payload))
+    records = build_infer_records(normalized_payload, decisions_by_frame_number=decisions_by_frame_number)
     segments = merge_segments(
         records,
         float(video_info["duration_seconds"]),
@@ -2312,6 +2376,7 @@ def write_infer_outputs(
     highlights_srt_path = video_output_dir / "highlights.srt"
     decisions_jsonl_path = video_output_dir / "frame_decisions.jsonl"
 
+    video_output_dir.mkdir(parents=True, exist_ok=True)
     analysis_path.write_text(json.dumps(analysis_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     segments_path.write_text(json.dumps(raw_segments_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     segments_srt_path.write_text(build_srt_text(segments), encoding="utf-8")
@@ -2909,6 +2974,7 @@ def infer_from_extract_index(
 
     decisions_by_frame_number: dict[int, dict[str, Any]] = dict(existing_decisions)
     checkpoint_path = checkpoint_path_for_index(index_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     if restart and checkpoint_path.exists():
         checkpoint_path.unlink()
     progress_path = write_sync_progress(
@@ -2926,7 +2992,7 @@ def infer_from_extract_index(
     try:
         with checkpoint_path.open("a", encoding="utf-8") as checkpoint_handle:
             for frame in progress:
-                image_path = Path(frame["image_path"])
+                image_path = resolve_frame_image_path(frame, index_path=index_path, payload=payload)
                 image_bytes = image_path.read_bytes()
                 should_abort_run = False
                 while True:
@@ -4045,7 +4111,7 @@ def command_run(args: argparse.Namespace) -> int:
             if getattr(video_args, "extract_index", None)
             else ensure_extract_index(video_args, config)
         )
-        stage_output_dir = index_path.parent.parent
+        stage_output_dir = resolve_video_dir_for_index(index_path)
         temporal_args = argparse.Namespace(
             input=str(stage_output_dir / "analysis.json"),
             output_dir=str(stage_output_dir),
