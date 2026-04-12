@@ -1,0 +1,270 @@
+{
+  "stage": "infer.pack",
+  "source_extract_index": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\index.json",
+  "pack_number": 1,
+  "pack_size": 26,
+  "frame_count": 26,
+  "frames": [
+    {
+      "frame_number": 1500,
+      "timestamp_seconds": 25.025,
+      "timestamp_srt": "00:00:25,025",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00025_025.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000001500.jpg",
+      "relative_image_path": "images/frame_000001500.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 1560,
+      "timestamp_seconds": 26.026,
+      "timestamp_srt": "00:00:26,026",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00026_026.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000001560.jpg",
+      "relative_image_path": "images/frame_000001560.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 1620,
+      "timestamp_seconds": 27.027,
+      "timestamp_srt": "00:00:27,027",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00027_027.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000001620.jpg",
+      "relative_image_path": "images/frame_000001620.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 1680,
+      "timestamp_seconds": 28.028,
+      "timestamp_srt": "00:00:28,028",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00028_028.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000001680.jpg",
+      "relative_image_path": "images/frame_000001680.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 1740,
+      "timestamp_seconds": 29.029,
+      "timestamp_srt": "00:00:29,029",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00029_029.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000001740.jpg",
+      "relative_image_path": "images/frame_000001740.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 1800,
+      "timestamp_seconds": 30.03,
+      "timestamp_srt": "00:00:30,030",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00030_030.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000001800.jpg",
+      "relative_image_path": "images/frame_000001800.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 1860,
+      "timestamp_seconds": 31.031,
+      "timestamp_srt": "00:00:31,031",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00031_031.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000001860.jpg",
+      "relative_image_path": "images/frame_000001860.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 1920,
+      "timestamp_seconds": 32.032,
+      "timestamp_srt": "00:00:32,032",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00032_032.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000001920.jpg",
+      "relative_image_path": "images/frame_000001920.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 1980,
+      "timestamp_seconds": 33.033,
+      "timestamp_srt": "00:00:33,033",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00033_033.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000001980.jpg",
+      "relative_image_path": "images/frame_000001980.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2040,
+      "timestamp_seconds": 34.034,
+      "timestamp_srt": "00:00:34,034",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00034_034.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002040.jpg",
+      "relative_image_path": "images/frame_000002040.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2100,
+      "timestamp_seconds": 35.035,
+      "timestamp_srt": "00:00:35,035",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00035_035.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002100.jpg",
+      "relative_image_path": "images/frame_000002100.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2220,
+      "timestamp_seconds": 37.037,
+      "timestamp_srt": "00:00:37,037",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00037_037.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002220.jpg",
+      "relative_image_path": "images/frame_000002220.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2280,
+      "timestamp_seconds": 38.038,
+      "timestamp_srt": "00:00:38,038",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00038_038.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002280.jpg",
+      "relative_image_path": "images/frame_000002280.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2340,
+      "timestamp_seconds": 39.039,
+      "timestamp_srt": "00:00:39,039",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00039_039.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002340.jpg",
+      "relative_image_path": "images/frame_000002340.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2400,
+      "timestamp_seconds": 40.04,
+      "timestamp_srt": "00:00:40,040",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00040_040.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002400.jpg",
+      "relative_image_path": "images/frame_000002400.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2460,
+      "timestamp_seconds": 41.041,
+      "timestamp_srt": "00:00:41,041",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00041_041.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002460.jpg",
+      "relative_image_path": "images/frame_000002460.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2520,
+      "timestamp_seconds": 42.042,
+      "timestamp_srt": "00:00:42,042",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00042_042.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002520.jpg",
+      "relative_image_path": "images/frame_000002520.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2580,
+      "timestamp_seconds": 43.043,
+      "timestamp_srt": "00:00:43,043",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00043_043.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002580.jpg",
+      "relative_image_path": "images/frame_000002580.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2640,
+      "timestamp_seconds": 44.044,
+      "timestamp_srt": "00:00:44,044",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00044_044.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002640.jpg",
+      "relative_image_path": "images/frame_000002640.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2700,
+      "timestamp_seconds": 45.045,
+      "timestamp_srt": "00:00:45,045",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00045_045.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002700.jpg",
+      "relative_image_path": "images/frame_000002700.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2760,
+      "timestamp_seconds": 46.046,
+      "timestamp_srt": "00:00:46,046",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00046_046.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002760.jpg",
+      "relative_image_path": "images/frame_000002760.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2820,
+      "timestamp_seconds": 47.047,
+      "timestamp_srt": "00:00:47,047",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00047_047.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002820.jpg",
+      "relative_image_path": "images/frame_000002820.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2880,
+      "timestamp_seconds": 48.048,
+      "timestamp_srt": "00:00:48,048",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00048_048.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002880.jpg",
+      "relative_image_path": "images/frame_000002880.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 2940,
+      "timestamp_seconds": 49.049,
+      "timestamp_srt": "00:00:49,049",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00049_049.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000002940.jpg",
+      "relative_image_path": "images/frame_000002940.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 3000,
+      "timestamp_seconds": 50.05,
+      "timestamp_srt": "00:00:50,050",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00050_050.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000003000.jpg",
+      "relative_image_path": "images/frame_000003000.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    },
+    {
+      "frame_number": 3060,
+      "timestamp_seconds": 51.051,
+      "timestamp_srt": "00:00:51,051",
+      "original_image_path": "C:\\Users\\neptu\\insta360\\原视频\\VID_20260406_172953_002\\extract\\frames\\00051_051.jpg",
+      "copied_image_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\images\\frame_000003060.jpg",
+      "relative_image_path": "images/frame_000003060.jpg",
+      "image_width": 1280,
+      "image_height": 720
+    }
+  ],
+  "response_path": "C:\\Users\\neptu\\Documents\\Projects\\New project\\infer_calib_26\\packs\\pack_0001\\response.json"
+}

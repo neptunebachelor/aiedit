@@ -142,6 +142,45 @@ python pipeline.py infer \
 
 `collect` and `cancel` now support both Gemini and Qwen async manifests.
 
+### Gemini Files API upload-only flow
+
+Use this when you want to upload a local image, PDF, audio file, or video once, save its Gemini file handle, and run inference later from a manifest.
+
+Upload a file and write `workspace/jobs/<job-id>/manifest.json`:
+
+```bash
+python scripts/upload_to_gemini.py \
+  --file ./input/test.png \
+  --job-id test001 \
+  --mime-type image/png \
+  --display-name test.png
+```
+
+The manifest contains the two fields needed by a later API infer step:
+
+- `gemini_file_name`, used for `files.get` and `files.delete`
+- `gemini_file_uri`, used as `file_data.file_uri` in `generateContent`
+
+Fetch metadata for a previously uploaded file:
+
+```bash
+python scripts/get_file_metadata.py --name files/abc123xyz
+```
+
+Delete a test upload:
+
+```bash
+python scripts/delete_gemini_file.py --name files/abc123xyz
+```
+
+You can also delete by manifest:
+
+```bash
+python scripts/delete_gemini_file.py --manifest ./workspace/jobs/test001/manifest.json
+```
+
+The scripts read `GEMINI_API_KEY` from `.env` or the process environment. Add `--copy-original` to the upload command if you also want `workspace/jobs/<job-id>/original.bin`; by default the local file is not copied.
+
 ### 3. Temporal analysis (recommended)
 
 ```bash

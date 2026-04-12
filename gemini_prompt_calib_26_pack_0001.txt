@@ -1,0 +1,47 @@
+Read and follow this skill file exactly:
+@C:/Users/neptu/Documents/Projects/New project/skills/ride-video-infer/SKILL.md
+
+Task: run the skill's Gemini In-Session Pack Inference Contract for this deterministic pack range.
+
+Skill directory: C:/Users/neptu/Documents/Projects/New project/skills/ride-video-infer
+Packs directory: C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs
+Start pack: 0001
+End pack: 0001
+
+Packs to infer:
+- pack_0001: manifest @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/manifest.json, response C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/response.json, frames 26
+
+Deterministic image inputs:
+pack_0001 image inputs:
+- frame_number 1500, timestamp 25.025s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000001500.jpg
+- frame_number 1560, timestamp 26.026s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000001560.jpg
+- frame_number 1620, timestamp 27.027s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000001620.jpg
+- frame_number 1680, timestamp 28.028s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000001680.jpg
+- frame_number 1740, timestamp 29.029s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000001740.jpg
+- frame_number 1800, timestamp 30.030s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000001800.jpg
+- frame_number 1860, timestamp 31.031s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000001860.jpg
+- frame_number 1920, timestamp 32.032s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000001920.jpg
+- frame_number 1980, timestamp 33.033s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000001980.jpg
+- frame_number 2040, timestamp 34.034s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002040.jpg
+- frame_number 2100, timestamp 35.035s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002100.jpg
+- frame_number 2220, timestamp 37.037s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002220.jpg
+- frame_number 2280, timestamp 38.038s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002280.jpg
+- frame_number 2340, timestamp 39.039s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002340.jpg
+- frame_number 2400, timestamp 40.040s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002400.jpg
+- frame_number 2460, timestamp 41.041s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002460.jpg
+- frame_number 2520, timestamp 42.042s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002520.jpg
+- frame_number 2580, timestamp 43.043s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002580.jpg
+- frame_number 2640, timestamp 44.044s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002640.jpg
+- frame_number 2700, timestamp 45.045s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002700.jpg
+- frame_number 2760, timestamp 46.046s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002760.jpg
+- frame_number 2820, timestamp 47.047s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002820.jpg
+- frame_number 2880, timestamp 48.048s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002880.jpg
+- frame_number 2940, timestamp 49.049s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000002940.jpg
+- frame_number 3000, timestamp 50.050s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000003000.jpg
+- frame_number 3060, timestamp 51.051s, image @C:/Users/neptu/Documents/Projects/New project/infer_calib_26/packs/pack_0001/images/frame_000003060.jpg
+
+Do not run another gemini command.
+Do not infer packs outside this range.
+Use each manifest as the source of truth, inspect the pack images as separate image inputs, and write one response.json per pack.
+After writing response files, run the skill's BOM cleanup script for this exact pack range before reporting completion.
+After writing the response files, report only the response paths, frame counts, and any pack you could not complete.

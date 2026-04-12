@@ -1,0 +1,16 @@
+Use the reloaded ride-video-infer skill.
+
+Execute a Gemini File API all-frame test for:
+C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/extract/index.json
+
+Requirements:
+- source of truth is extract/index.json only
+- ignore temp
+- first 100 image_path frames only
+- upload first
+- infer second
+- keep outputs under the video's infer directory
+- do not echo the skill back to me
+
+Treat this as explicit all-frame File API inference, not candidate-only inference.
+Return only commands run, files written, processed/kept/failed counts, and analysis.json status.
