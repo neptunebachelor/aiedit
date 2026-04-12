@@ -14,24 +14,24 @@ Requested change:
 - allow route priority to be configured from project config and/or CLI
 - avoid hard-coding the fallback order in code
 
-### 2. Store per-video metadata beside the source video
+### 2. Store per-video metadata in the repo-local video data root
 
 Current behavior:
 
-- processing metadata and derived files are written under the code workspace output directory
+- video-processing metadata and derived files default to the repo-local `.video_data` directory
 
 Requested change:
 
-- do not write video processing metadata into the code directory by default
-- place all per-video metadata and derived artifacts in the same directory as the source video
-- use a sibling folder named exactly after the source video stem
+- keep video processing metadata out of external source-video directories by default
+- place all per-video metadata and derived artifacts under `<repo_root>/.video_data/videos/<video_slug>`
+- place extracted frame images under `<repo_root>/.video_data/frames/<video_slug>`
 
 Desired layout example:
 
 - source video:
   `C:\path\to\videos\VID_20260408_172214_010.mp4`
 - artifact folder:
-  `C:\path\to\videos\VID_20260408_172214_010\`
+  `<repo_root>\.video_data\videos\VID_20260408_172214_010\`
 
 This should include:
 

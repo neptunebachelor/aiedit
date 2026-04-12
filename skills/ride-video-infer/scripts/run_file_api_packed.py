@@ -7,16 +7,23 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 MIN_KEEP_SCORE = 0.65
+
+
+class ProviderRequestTimeoutError(TimeoutError):
+    """Raised when a provider SDK request exceeds the per-pack timeout."""
 
 
 def read_json(path: Path) -> Any:
@@ -69,6 +76,14 @@ def append_jsonl(path: Path, decisions: list[dict[str, Any]]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         for decision in decisions:
             handle.write(json.dumps(decision, ensure_ascii=False) + "\n")
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
 
 
 def default_decisions_path(upload_manifest_path: Path, provider: str) -> Path:
@@ -337,6 +352,61 @@ def call_gemini_pack(client: Any, *, model: str, prompt: str, pack: list[dict[st
     return extract_gemini_text(response)
 
 
+def call_provider_pack(
+    client: Any,
+    *,
+    provider: str,
+    model: str,
+    prompt: str,
+    pack: list[dict[str, Any]],
+    temperature: float,
+) -> str:
+    if provider == "openai":
+        return call_openai_pack(client, model=model, prompt=prompt, pack=pack, temperature=temperature)
+    if provider == "gemini":
+        return call_gemini_pack(client, model=model, prompt=prompt, pack=pack, temperature=temperature)
+    raise ValueError(f"Unsupported provider: {provider}")
+
+
+def call_provider_pack_with_timeout(
+    client: Any,
+    *,
+    provider: str,
+    model: str,
+    prompt: str,
+    pack: list[dict[str, Any]],
+    temperature: float,
+    request_timeout: int = 180,
+) -> str:
+    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def target() -> None:
+        try:
+            output = call_provider_pack(
+                client,
+                provider=provider,
+                model=model,
+                prompt=prompt,
+                pack=pack,
+                temperature=temperature,
+            )
+            result_queue.put(("ok", output))
+        except Exception as exc:  # Propagate provider SDK exceptions to the main thread.
+            result_queue.put(("error", exc))
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    timeout_seconds = max(1, int(request_timeout))
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        raise ProviderRequestTimeoutError(f"provider request exceeded {timeout_seconds} seconds")
+
+    status, payload = result_queue.get()
+    if status == "ok":
+        return str(payload)
+    raise payload
+
+
 def make_client(provider: str) -> Any:
     if provider == "openai":
         from openai import OpenAI
@@ -390,6 +460,7 @@ def build_run_manifest(
     max_frames: int,
     prompt_variant: str,
     temperature: float,
+    request_timeout: int = 180,
     include_all_frames: bool,
     restart: bool,
     dry_run: bool,
@@ -414,6 +485,7 @@ def build_run_manifest(
         "end_pack": int(end_pack),
         "max_frames": int(max_frames),
         "temperature": float(temperature),
+        "request_timeout_seconds": int(request_timeout),
         "min_keep_score": MIN_KEEP_SCORE,
         "retry_policy": "retry once with strict prompt, then emit skill_error rejects for missing frames",
         "include_all_frames": bool(include_all_frames),
@@ -433,6 +505,37 @@ def build_run_manifest(
     }
 
 
+def write_pack_state(
+    pack_dir: Path,
+    *,
+    pack_number: int,
+    pack_frames: list[dict[str, Any]],
+    provider: str,
+    model: str,
+    attempt: str,
+    request_timeout: int = 180,
+) -> None:
+    write_json(
+        pack_dir / "pack_state.json",
+        {
+            "pack_number": int(pack_number),
+            "frame_numbers": [int(frame["frame_number"]) for frame in pack_frames],
+            "start_time": utc_now_iso(),
+            "provider": provider,
+            "model": model,
+            "attempt": attempt,
+            "request_timeout_seconds": int(request_timeout),
+        },
+    )
+
+
+def write_provider_error(pack_dir: Path, *, reason: str, exc: BaseException | None = None) -> None:
+    lines = [reason]
+    if exc is not None:
+        lines.extend(["", "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()])
+    (pack_dir / "raw_response.error.txt").write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
 def run_packed_inference(
     *,
     upload_manifest_path: Path,
@@ -444,6 +547,7 @@ def run_packed_inference(
     max_frames: int,
     prompt_variant: str,
     temperature: float,
+    request_timeout: int = 180,
     output_decisions: Path | None,
     include_all_frames: bool,
     restart: bool,
@@ -482,6 +586,7 @@ def run_packed_inference(
         max_frames=max_frames,
         prompt_variant=prompt_variant,
         temperature=temperature,
+        request_timeout=request_timeout,
         include_all_frames=include_all_frames,
         restart=restart,
         dry_run=dry_run,
@@ -510,21 +615,113 @@ def run_packed_inference(
         pack_number = int(pack["pack_number"])
         pack_frames = pack["frames"]
         pack_dir = run_dir / f"pack_{pack_number:04d}"
-        prompt = build_prompt(pack_frames, prompt_variant=prompt_variant)
-        if resolved_provider == "openai":
-            output = call_openai_pack(inference_client, model=model, prompt=prompt, pack=pack_frames, temperature=temperature)
-        else:
-            output = call_gemini_pack(inference_client, model=model, prompt=prompt, pack=pack_frames, temperature=temperature)
         pack_dir.mkdir(parents=True, exist_ok=True)
+        prompt = build_prompt(pack_frames, prompt_variant=prompt_variant)
+        frame_numbers = [int(frame["frame_number"]) for frame in pack_frames]
+        log(f"pack {pack_number}/{len(packs)}: starting {len(pack_frames)} frames {frame_numbers}")
+        write_pack_state(
+            pack_dir,
+            pack_number=pack_number,
+            pack_frames=pack_frames,
+            provider=resolved_provider,
+            model=model,
+            attempt="initial",
+            request_timeout=request_timeout,
+        )
+        log(
+            f"pack {pack_number}/{len(packs)}: requesting provider={resolved_provider} "
+            f"model={model} timeout={int(request_timeout)}s"
+        )
+        try:
+            output = call_provider_pack_with_timeout(
+                inference_client,
+                provider=resolved_provider,
+                model=model,
+                prompt=prompt,
+                pack=pack_frames,
+                temperature=temperature,
+                request_timeout=request_timeout,
+            )
+        except ProviderRequestTimeoutError as exc:
+            failed_packs += 1
+            write_provider_error(pack_dir, reason=f"provider_error: timeout: {exc}", exc=exc)
+            missing = frame_numbers
+            duplicates: list[int] = []
+            normalized = [reject_decision(frame, "provider_error: timeout") for frame in pack_frames]
+            append_jsonl(decisions_path, normalized)
+            keep_count = sum(1 for item in normalized if item.get("keep"))
+            write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(pack_frames), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count, "error": "provider_error: timeout"})
+            processed += len(normalized)
+            kept += keep_count
+            log(f"pack {pack_number}/{len(packs)} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
+            continue
+        except Exception as exc:
+            failed_packs += 1
+            write_provider_error(pack_dir, reason=f"provider_error: exception: {type(exc).__name__}: {exc}", exc=exc)
+            missing = frame_numbers
+            duplicates = []
+            normalized = [reject_decision(frame, f"provider_error: exception {type(exc).__name__}") for frame in pack_frames]
+            append_jsonl(decisions_path, normalized)
+            keep_count = sum(1 for item in normalized if item.get("keep"))
+            write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(pack_frames), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count, "error": f"provider_error: exception {type(exc).__name__}"})
+            processed += len(normalized)
+            kept += keep_count
+            log(f"pack {pack_number}/{len(packs)} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
+            continue
         (pack_dir / "raw_response.txt").write_text(output, encoding="utf-8")
         decisions = parse_decision_array(output) or []
         normalized, missing, duplicates = validate_pack_decisions(decisions, pack_frames)
         if missing or duplicates:
             retry_prompt = build_prompt(pack_frames, prompt_variant=prompt_variant, strict_retry=True)
-            if resolved_provider == "openai":
-                retry_output = call_openai_pack(inference_client, model=model, prompt=retry_prompt, pack=pack_frames, temperature=temperature)
-            else:
-                retry_output = call_gemini_pack(inference_client, model=model, prompt=retry_prompt, pack=pack_frames, temperature=temperature)
+            write_pack_state(
+                pack_dir,
+                pack_number=pack_number,
+                pack_frames=pack_frames,
+                provider=resolved_provider,
+                model=model,
+                attempt="retry",
+                request_timeout=request_timeout,
+            )
+            log(
+                f"pack {pack_number}/{len(packs)}: retrying provider={resolved_provider} "
+                f"model={model} timeout={int(request_timeout)}s missing={missing} duplicates={duplicates}"
+            )
+            try:
+                retry_output = call_provider_pack_with_timeout(
+                    inference_client,
+                    provider=resolved_provider,
+                    model=model,
+                    prompt=retry_prompt,
+                    pack=pack_frames,
+                    temperature=temperature,
+                    request_timeout=request_timeout,
+                )
+            except ProviderRequestTimeoutError as exc:
+                failed_packs += 1
+                write_provider_error(pack_dir, reason=f"provider_error: timeout during retry: {exc}", exc=exc)
+                missing = frame_numbers
+                duplicates = []
+                normalized = [reject_decision(frame, "provider_error: timeout") for frame in pack_frames]
+                append_jsonl(decisions_path, normalized)
+                keep_count = sum(1 for item in normalized if item.get("keep"))
+                write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(pack_frames), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count, "error": "provider_error: timeout"})
+                processed += len(normalized)
+                kept += keep_count
+                log(f"pack {pack_number}/{len(packs)} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
+                continue
+            except Exception as exc:
+                failed_packs += 1
+                write_provider_error(pack_dir, reason=f"provider_error: exception during retry: {type(exc).__name__}: {exc}", exc=exc)
+                missing = frame_numbers
+                duplicates = []
+                normalized = [reject_decision(frame, f"provider_error: exception {type(exc).__name__}") for frame in pack_frames]
+                append_jsonl(decisions_path, normalized)
+                keep_count = sum(1 for item in normalized if item.get("keep"))
+                write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(pack_frames), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count, "error": f"provider_error: exception {type(exc).__name__}"})
+                processed += len(normalized)
+                kept += keep_count
+                log(f"pack {pack_number}/{len(packs)} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
+                continue
             (pack_dir / "raw_response.retry.txt").write_text(retry_output, encoding="utf-8")
             decisions = parse_decision_array(retry_output) or []
             normalized, missing, duplicates = validate_pack_decisions(decisions, pack_frames)
@@ -536,9 +733,11 @@ def run_packed_inference(
                 error_reason="skill_error: missing or duplicate frame in file api output",
             )
         append_jsonl(decisions_path, normalized)
-        write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(pack_frames), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": sum(1 for item in normalized if item.get("keep"))})
+        keep_count = sum(1 for item in normalized if item.get("keep"))
+        write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(pack_frames), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count})
         processed += len(normalized)
-        kept += sum(1 for item in normalized if item.get("keep"))
+        kept += keep_count
+        log(f"pack {pack_number}/{len(packs)} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
 
     result: dict[str, Any] = {
         "status": "done",
@@ -566,6 +765,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--prompt-variant", default="default")
     parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--request-timeout", type=int, default=180, help="Timeout in seconds for each provider request.")
     parser.add_argument("--output-decisions", help="Destination decisions JSONL")
     parser.add_argument("--include-all-frames", action="store_true", help="Infer all uploaded frames instead of candidate frames only")
     parser.add_argument("--restart", action="store_true")
@@ -587,6 +787,7 @@ def main() -> int:
         max_frames=int(args.max_frames),
         prompt_variant=str(args.prompt_variant),
         temperature=float(args.temperature),
+        request_timeout=int(args.request_timeout),
         output_decisions=Path(args.output_decisions) if args.output_decisions else None,
         include_all_frames=bool(args.include_all_frames),
         restart=bool(args.restart),

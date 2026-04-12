@@ -8,9 +8,23 @@ import hashlib
 import json
 import mimetypes
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def find_repo_root(start: Path) -> Path:
+    for candidate in [start, *start.parents]:
+        if (candidate / "pipeline.py").exists():
+            return candidate
+    raise RuntimeError("Could not find project root containing pipeline.py")
+
+
+REPO_ROOT = find_repo_root(Path(__file__).resolve())
+sys.path.insert(0, str(REPO_ROOT))
+
+from video_data_paths import infer_dir_from_index, resolve_frame_image_path  # noqa: E402
 
 
 IMAGE_MIME_BY_SUFFIX = {
@@ -32,6 +46,26 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def progress(message: str, *, quiet: bool = False) -> None:
+    if not quiet:
+        print(message, file=sys.stderr, flush=True)
+
+
+def fallback_frame_number(frame: dict[str, Any]) -> int | str:
+    value = frame.get("frame_number", "")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def fallback_timestamp_seconds(frame: dict[str, Any]) -> float:
+    try:
+        return float(frame.get("timestamp_seconds", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -49,7 +83,7 @@ def detect_mime_type(path: Path) -> str:
 
 
 def default_manifest_path(index_path: Path, provider: str) -> Path:
-    return index_path.parent.parent / "infer" / f"file_uploads.{provider}.json"
+    return infer_dir_from_index(index_path) / f"file_uploads.{provider}.json"
 
 
 def load_existing_entries(path: Path | None) -> dict[tuple[int, str], dict[str, Any]]:
@@ -143,8 +177,13 @@ def make_client(provider: str) -> Any:
     raise ValueError(f"Unsupported provider: {provider}")
 
 
-def build_upload_entry(frame: dict[str, Any]) -> dict[str, Any]:
-    image_path = Path(str(frame["image_path"])).expanduser().resolve()
+def build_upload_entry(
+    frame: dict[str, Any],
+    *,
+    index_path: Path | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    image_path = resolve_frame_image_path(frame, index_path=index_path, payload=payload)
     if not image_path.exists():
         raise FileNotFoundError(image_path)
     return {
@@ -169,6 +208,7 @@ def build_manifest(
     reuse: bool = False,
     dry_run: bool = False,
     client: Any | None = None,
+    quiet: bool = False,
 ) -> dict[str, Any]:
     if include not in {"candidates", "all"}:
         raise ValueError("--include must be candidates or all")
@@ -176,7 +216,7 @@ def build_manifest(
         raise ValueError("--provider must be openai or gemini")
     index_path = index_path.expanduser().resolve()
     manifest_path = output_path.expanduser().resolve() if output_path else default_manifest_path(index_path, provider)
-    _, frames = frame_rows_from_index(index_path, include=include, max_frames=max_frames)
+    index_payload, frames = frame_rows_from_index(index_path, include=include, max_frames=max_frames)
     existing = load_existing_entries(manifest_path if reuse else None)
     upload_client = client if client is not None else (None if dry_run else make_client(provider))
 
@@ -185,39 +225,6 @@ def build_manifest(
     reused_count = 0
     planned_count = 0
     failed_count = 0
-    for frame in frames:
-        entry = build_upload_entry(frame)
-        reusable = existing.get((int(entry["frame_number"]), str(entry["sha256"])))
-        if reuse and reusable and has_provider_reference(reusable, provider):
-            entry.update(provider_refs(reusable, provider))
-            entry["upload_status"] = "reused"
-            reused_count += 1
-            manifest_frames.append(entry)
-            continue
-
-        if dry_run:
-            entry.update(provider_refs({}, provider))
-            entry["upload_status"] = "planned"
-            planned_count += 1
-            manifest_frames.append(entry)
-            continue
-
-        try:
-            image_path = Path(str(entry["local_image_path"]))
-            if provider == "openai":
-                refs = upload_openai_frame(upload_client, image_path)
-            else:
-                refs = upload_gemini_frame(upload_client, image_path, mime_type=str(entry["mime_type"]))
-            entry.update(refs)
-            entry["upload_status"] = "uploaded"
-            uploaded_count += 1
-        except Exception as exc:  # noqa: BLE001
-            entry.update(provider_refs({}, provider))
-            entry["upload_status"] = "failed"
-            entry["error"] = f"{type(exc).__name__}: {exc}"
-            failed_count += 1
-        manifest_frames.append(entry)
-
     manifest = {
         "stage": "infer.file_uploads",
         "provider": provider,
@@ -232,7 +239,84 @@ def build_manifest(
         "dry_run": dry_run,
         "frames": manifest_frames,
     }
+
+    def refresh_manifest_counts() -> None:
+        manifest["generated_at"] = datetime.now(timezone.utc).isoformat()
+        manifest["frame_count"] = len(manifest_frames)
+        manifest["uploaded_count"] = uploaded_count
+        manifest["reused_count"] = reused_count
+        manifest["planned_count"] = planned_count
+        manifest["failed_count"] = failed_count
+
+    progress(
+        f"starting upload provider={provider} include={include} total_frames={len(frames)}",
+        quiet=False,
+    )
+    for frame_index, frame in enumerate(frames, start=1):
+        frame_number = str(frame.get("frame_number", ""))
+        raw_image_path = str(frame.get("image_path", "") or "")
+        progress(
+            f"uploading {frame_index}/{len(frames)} frame_number={frame_number} path={raw_image_path}",
+            quiet=quiet,
+        )
+        try:
+            entry = build_upload_entry(frame, index_path=index_path, payload=index_payload)
+            reusable = existing.get((int(entry["frame_number"]), str(entry["sha256"])))
+            if reuse and reusable and has_provider_reference(reusable, provider):
+                entry.update(provider_refs(reusable, provider))
+                entry["upload_status"] = "reused"
+                reused_count += 1
+                result = "reused"
+            elif dry_run:
+                entry.update(provider_refs({}, provider))
+                entry["upload_status"] = "planned"
+                planned_count += 1
+                result = "planned"
+            else:
+                image_path = Path(str(entry["local_image_path"]))
+                if provider == "openai":
+                    refs = upload_openai_frame(upload_client, image_path)
+                else:
+                    refs = upload_gemini_frame(upload_client, image_path, mime_type=str(entry["mime_type"]))
+                entry.update(refs)
+                entry["upload_status"] = "uploaded"
+                uploaded_count += 1
+                result = "uploaded"
+        except Exception as exc:  # noqa: BLE001
+            entry = {
+                "frame_number": fallback_frame_number(frame),
+                "candidate": bool(frame.get("candidate", False)),
+                "timestamp_seconds": fallback_timestamp_seconds(frame),
+                "timestamp_srt": str(frame.get("timestamp_srt", "") or ""),
+                "local_image_path": raw_image_path,
+                "mime_type": detect_mime_type(Path(raw_image_path)) if raw_image_path else "application/octet-stream",
+                "byte_size": 0,
+                "sha256": "",
+            }
+            entry.update(provider_refs({}, provider))
+            entry["upload_status"] = "failed"
+            entry["error"] = f"{type(exc).__name__}: {exc}"
+            failed_count += 1
+            result = "failed"
+        manifest_frames.append(entry)
+        refresh_manifest_counts()
+        write_json(manifest_path, manifest)
+        progress(
+            f"{result} {frame_index}/{len(frames)} frame_number={entry.get('frame_number')} path={entry.get('local_image_path')}",
+            quiet=quiet,
+        )
+
+    refresh_manifest_counts()
     write_json(manifest_path, manifest)
+    print(
+        "summary "
+        f"uploaded_count={uploaded_count} "
+        f"reused_count={reused_count} "
+        f"failed_count={failed_count} "
+        f"manifest={manifest_path}",
+        file=sys.stderr,
+        flush=True,
+    )
     return manifest
 
 
@@ -245,6 +329,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--reuse", action="store_true", help="Reuse matching uploaded file references from the output manifest")
     parser.add_argument("--dry-run", action="store_true", help="Write a planned manifest without uploading files")
+    parser.add_argument("--quiet", action="store_true", help="Suppress per-frame upload progress logs")
     return parser.parse_args()
 
 
@@ -260,6 +345,7 @@ def main() -> int:
         output_path=output_path,
         reuse=bool(args.reuse),
         dry_run=bool(args.dry_run),
+        quiet=bool(args.quiet),
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
     return 2 if int(manifest.get("failed_count", 0) or 0) else 0

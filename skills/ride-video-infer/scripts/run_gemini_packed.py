@@ -8,14 +8,43 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
+import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+def find_repo_root(start: Path) -> Path:
+    for candidate in [start, *start.parents]:
+        if (candidate / "pipeline.py").exists():
+            return candidate
+    raise RuntimeError("Could not find project root containing pipeline.py")
+
+
+REPO_ROOT = find_repo_root(Path(__file__).resolve())
+sys.path.insert(0, str(REPO_ROOT))
+
+from video_data_paths import infer_dir_from_index, resolve_frame_image_path, resolve_video_data_root  # noqa: E402
+
+
+class GeminiCLIError(RuntimeError):
+    def __init__(self, message: str, *, output: str = "", returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.output = output
+        self.returncode = returncode
+
+
+class GeminiCLITimeoutError(TimeoutError):
+    def __init__(self, message: str, *, output: str = "") -> None:
+        super().__init__(message)
+        self.output = output
 
 
 def safe_stem(value: str) -> str:
@@ -29,8 +58,7 @@ def safe_slug(value: str) -> str:
 
 
 def default_workspace_root() -> Path:
-    project_slug = safe_slug(Path.cwd().name)
-    return Path.home() / ".gemini" / "tmp" / project_slug / "ride-video-infer"
+    return resolve_video_data_root() / "debug" / "gemini_cli"
 
 
 def ensure_run_dir(preferred_root: Path, run_name: str) -> Path:
@@ -77,6 +105,8 @@ def frames_from_index(index_path: Path, *, max_frames: int) -> list[dict[str, An
     frames = [frame for frame in payload["frames"] if frame.get("candidate") and frame.get("image_path")]
     if max_frames > 0:
         frames = frames[:max_frames]
+    for frame in frames:
+        frame["image_path"] = str(resolve_frame_image_path(frame, index_path=index_path, payload=payload))
     return frames
 
 
@@ -104,6 +134,19 @@ def write_decision_jsonl(path: Path, decisions: list[dict[str, Any]]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         for decision in decisions:
             handle.write(json.dumps(decision, ensure_ascii=False) + "\n")
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
 
 
 def reject_decision(frame: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -251,7 +294,87 @@ def build_prompt(pack: list[dict[str, Any]], *, strict_retry: bool = False) -> s
     return "\n".join(lines)
 
 
-def call_gemini(prompt: str, *, cwd: Path, model: str, timeout_seconds: int) -> str:
+def write_pack_state(
+    pack_dir: Path,
+    *,
+    pack_number: int,
+    total_packs: int,
+    pack_frames: list[dict[str, Any]],
+    model: str,
+    attempt: str,
+    timeout_seconds: int,
+) -> None:
+    write_json(
+        pack_dir / "pack_state.json",
+        {
+            "pack_number": int(pack_number),
+            "total_packs": int(total_packs),
+            "frame_numbers": [int(frame["frame_number"]) for frame in pack_frames],
+            "start_time": utc_now_iso(),
+            "provider": "gemini_cli",
+            "model": model,
+            "attempt": attempt,
+            "timeout_seconds": int(timeout_seconds),
+        },
+    )
+
+
+def write_raw_failure(pack_dir: Path, *, filename: str, output: str, error: BaseException) -> None:
+    if output:
+        (pack_dir / filename).write_text(output, encoding="utf-8")
+    lines = [
+        f"provider_error: {type(error).__name__}: {error}",
+        "",
+        output.strip(),
+        "",
+        "".join(traceback.format_exception(type(error), error, error.__traceback__)).strip(),
+    ]
+    (pack_dir / "raw_response.error.txt").write_text("\n".join(part for part in lines if part).strip() + "\n", encoding="utf-8")
+
+
+def reject_pack(pack: list[dict[str, Any]], reason: str) -> list[dict[str, Any]]:
+    return [reject_decision(frame, reason) for frame in pack]
+
+
+def kill_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if process.poll() is None:
+            process.kill()
+        return
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                process.kill()
+
+
+def call_gemini(
+    prompt: str,
+    *,
+    cwd: Path,
+    model: str,
+    timeout_seconds: int,
+    progress_label: str,
+    progress_interval_seconds: int,
+) -> str:
     executable = shutil.which("gemini")
     if executable is None:
         raise RuntimeError("Gemini CLI executable was not found on PATH.")
@@ -259,17 +382,43 @@ def call_gemini(prompt: str, *, cwd: Path, model: str, timeout_seconds: int) -> 
     if model.strip():
         cmd.extend(["--model", model.strip()])
     cmd.extend(["-p", prompt])
-    result = subprocess.run(
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    process = subprocess.Popen(
         cmd,
         cwd=str(cwd),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=timeout_seconds,
-        check=False,
+        creationflags=creationflags,
+        start_new_session=os.name != "nt",
     )
-    return "\n".join(part for part in [result.stdout, result.stderr] if part)
+    started = time.monotonic()
+    last_progress = started
+    timeout_seconds = max(1, int(timeout_seconds))
+    progress_interval_seconds = max(1, int(progress_interval_seconds))
+    while process.poll() is None:
+        now = time.monotonic()
+        elapsed = int(now - started)
+        if elapsed >= timeout_seconds:
+            kill_process_tree(process)
+            stdout, stderr = process.communicate()
+            output = "\n".join(part for part in [stdout, stderr] if part)
+            raise GeminiCLITimeoutError(f"{progress_label} exceeded {timeout_seconds} seconds", output=output)
+        if now - last_progress >= progress_interval_seconds:
+            log(f"{progress_label}: still waiting after {elapsed}s (timeout {timeout_seconds}s)")
+            last_progress = now
+        time.sleep(0.25)
+    stdout, stderr = process.communicate()
+    output = "\n".join(part for part in [stdout, stderr] if part)
+    if process.returncode != 0:
+        raise GeminiCLIError(
+            f"{progress_label} failed with exit code {process.returncode}",
+            output=output,
+            returncode=process.returncode,
+        )
+    return output
 
 
 def recommend_pack_size(args: argparse.Namespace) -> int:
@@ -292,7 +441,7 @@ def default_output_path(args: argparse.Namespace) -> Path:
     if args.output_decisions:
         return Path(args.output_decisions).expanduser().resolve()
     if args.index:
-        return Path(args.index).expanduser().resolve().parent.parent / "gemini_cli.frame_decisions.jsonl"
+        return infer_dir_from_index(Path(args.index).expanduser().resolve()) / "gemini_cli.frame_decisions.jsonl"
     return Path(args.image_dir).expanduser().resolve() / "gemini_cli.frame_decisions.jsonl"
 
 
@@ -308,6 +457,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="gemini-2.5-flash-lite", help="Gemini CLI model. Empty string uses CLI default.")
     parser.add_argument("--workspace", help="Temporary ASCII workspace for copied images.")
     parser.add_argument("--timeout-seconds", type=int, default=240, help="Timeout per pack.")
+    parser.add_argument("--progress-interval-seconds", type=int, default=30, help="Progress heartbeat while Gemini CLI is running.")
     parser.add_argument("--restart", action="store_true", help="Overwrite existing decisions instead of resuming.")
     parser.add_argument("--dry-run", action="store_true", help="Plan packs without calling Gemini CLI.")
     parser.add_argument("--apply", action="store_true", help="Run apply_decisions.py after inference. Requires --index.")
@@ -322,7 +472,7 @@ def main() -> int:
     else:
         frames = frames_from_image_dir(Path(args.image_dir).expanduser().resolve(), max_frames=int(args.max_frames))
     if not frames:
-        print(json.dumps({"status": "no_frames"}, indent=2))
+        log(json.dumps({"status": "no_frames"}, indent=2))
         return 0
 
     pack_size = recommend_pack_size(args)
@@ -332,16 +482,17 @@ def main() -> int:
     completed = load_existing_frame_numbers(output_path, restart=bool(args.restart))
     remaining = [frame for frame in frames if int(frame["frame_number"]) not in completed]
 
-    workspace_root = (
-        Path(args.workspace).expanduser().resolve()
-        if args.workspace
-        else default_workspace_root()
-    )
+    if args.workspace:
+        workspace_root = Path(args.workspace).expanduser().resolve()
+    elif args.index:
+        workspace_root = infer_dir_from_index(Path(args.index).expanduser().resolve()) / "gemini_cli_runs"
+    else:
+        workspace_root = default_workspace_root()
     run_name = f"run_{int(time.time())}_{safe_stem(output_path.stem)}"
     run_dir = workspace_root / run_name if args.dry_run else ensure_run_dir(workspace_root, run_name)
 
     total_packs = math_ceil_div(len(remaining), pack_size)
-    print(json.dumps(
+    log(json.dumps(
         {
             "status": "running",
             "frames": len(frames),
@@ -368,22 +519,104 @@ def main() -> int:
         copied_pack = copy_pack_images(pack, pack_dir)
         expected = [int(frame["frame_number"]) for frame in copied_pack]
 
-        output = call_gemini(
-            build_prompt(copied_pack),
-            cwd=pack_dir,
+        pack_number = pack_index + 1
+        log(f"pack {pack_number}/{total_packs}: starting {len(copied_pack)} frames {expected}")
+        write_pack_state(
+            pack_dir,
+            pack_number=pack_number,
+            total_packs=total_packs,
+            pack_frames=copied_pack,
             model=str(args.model),
+            attempt="initial",
             timeout_seconds=int(args.timeout_seconds),
         )
+        log(f"pack {pack_number}/{total_packs}: invoking Gemini CLI timeout={int(args.timeout_seconds)}s")
+        try:
+            output = call_gemini(
+                build_prompt(copied_pack),
+                cwd=pack_dir,
+                model=str(args.model),
+                timeout_seconds=int(args.timeout_seconds),
+                progress_label=f"pack {pack_number}/{total_packs}",
+                progress_interval_seconds=int(args.progress_interval_seconds),
+            )
+        except GeminiCLITimeoutError as exc:
+            failed_packs += 1
+            write_raw_failure(pack_dir, filename="raw_response.txt", output=exc.output, error=exc)
+            missing = expected
+            duplicates: list[int] = []
+            normalized = reject_pack(copied_pack, "provider_error: timeout")
+            write_decision_jsonl(output_path, normalized)
+            processed += len(normalized)
+            keep_count = sum(1 for item in normalized if item.get("keep"))
+            kept += keep_count
+            write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(copied_pack), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count, "error": "provider_error: timeout"})
+            log(f"pack {pack_number}/{total_packs} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
+            continue
+        except Exception as exc:
+            failed_packs += 1
+            output = str(getattr(exc, "output", "") or "")
+            write_raw_failure(pack_dir, filename="raw_response.txt", output=output, error=exc)
+            missing = expected
+            duplicates = []
+            normalized = reject_pack(copied_pack, f"provider_error: subprocess failure {type(exc).__name__}")
+            write_decision_jsonl(output_path, normalized)
+            processed += len(normalized)
+            keep_count = sum(1 for item in normalized if item.get("keep"))
+            kept += keep_count
+            write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(copied_pack), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count, "error": f"provider_error: subprocess failure {type(exc).__name__}"})
+            log(f"pack {pack_number}/{total_packs} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
+            continue
         (pack_dir / "raw_response.txt").write_text(output, encoding="utf-8")
         decisions = parse_decision_array(output) or []
         normalized, missing, duplicates = validate_pack_decisions(decisions, expected)
         if missing or duplicates:
-            output = call_gemini(
-                build_prompt(copied_pack, strict_retry=True),
-                cwd=pack_dir,
+            write_pack_state(
+                pack_dir,
+                pack_number=pack_number,
+                total_packs=total_packs,
+                pack_frames=copied_pack,
                 model=str(args.model),
+                attempt="retry",
                 timeout_seconds=int(args.timeout_seconds),
             )
+            log(f"pack {pack_number}/{total_packs}: retrying Gemini CLI missing={missing} duplicates={duplicates}")
+            try:
+                output = call_gemini(
+                    build_prompt(copied_pack, strict_retry=True),
+                    cwd=pack_dir,
+                    model=str(args.model),
+                    timeout_seconds=int(args.timeout_seconds),
+                    progress_label=f"pack {pack_number}/{total_packs} retry",
+                    progress_interval_seconds=int(args.progress_interval_seconds),
+                )
+            except GeminiCLITimeoutError as exc:
+                failed_packs += 1
+                write_raw_failure(pack_dir, filename="raw_response.retry.txt", output=exc.output, error=exc)
+                missing = expected
+                duplicates = []
+                normalized = reject_pack(copied_pack, "provider_error: timeout")
+                write_decision_jsonl(output_path, normalized)
+                processed += len(normalized)
+                keep_count = sum(1 for item in normalized if item.get("keep"))
+                kept += keep_count
+                write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(copied_pack), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count, "error": "provider_error: timeout"})
+                log(f"pack {pack_number}/{total_packs} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
+                continue
+            except Exception as exc:
+                failed_packs += 1
+                output = str(getattr(exc, "output", "") or "")
+                write_raw_failure(pack_dir, filename="raw_response.retry.txt", output=output, error=exc)
+                missing = expected
+                duplicates = []
+                normalized = reject_pack(copied_pack, f"provider_error: subprocess failure {type(exc).__name__}")
+                write_decision_jsonl(output_path, normalized)
+                processed += len(normalized)
+                keep_count = sum(1 for item in normalized if item.get("keep"))
+                kept += keep_count
+                write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(copied_pack), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count, "error": f"provider_error: subprocess failure {type(exc).__name__}"})
+                log(f"pack {pack_number}/{total_packs} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
+                continue
             (pack_dir / "raw_response.retry.txt").write_text(output, encoding="utf-8")
             decisions = parse_decision_array(output) or []
             normalized, missing, duplicates = validate_pack_decisions(decisions, expected)
@@ -398,8 +631,10 @@ def main() -> int:
 
         write_decision_jsonl(output_path, normalized)
         processed += len(normalized)
-        kept += sum(1 for item in normalized if item.get("keep"))
-        print(f"pack {pack_index + 1}/{total_packs}: wrote {len(normalized)} decisions, missing={missing}, duplicates={duplicates}")
+        keep_count = sum(1 for item in normalized if item.get("keep"))
+        kept += keep_count
+        write_json(pack_dir / "summary.json", {"pack_number": pack_number, "frame_count": len(copied_pack), "decision_count": len(normalized), "missing": missing, "duplicates": duplicates, "keep_count": keep_count})
+        log(f"pack {pack_number}/{total_packs} complete: decisions={len(normalized)} keep={keep_count} missing={missing} duplicates={duplicates}")
 
     result: dict[str, Any] = {
         "status": "done",
@@ -430,7 +665,7 @@ def main() -> int:
         result["apply_output"] = apply_result.stdout.strip()
         if apply_result.returncode != 0:
             result["apply_error"] = apply_result.stderr.strip()
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    log(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
