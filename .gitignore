@@ -7,4 +7,5 @@ __pycache__/
 input/
 output/
 output_gemini/
+workspace/jobs/
 deepseek_v3_tokenizer.zip

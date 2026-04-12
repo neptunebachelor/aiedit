@@ -1,0 +1,87 @@
+Read and follow this skill file exactly:
+@C:/Users/neptu/Documents/Projects/New project/skills/ride-video-infer/SKILL.md
+
+Task: run the skill's Gemini In-Session Pack Inference Contract for this deterministic pack range.
+
+Skill directory: C:/Users/neptu/Documents/Projects/New project/skills/ride-video-infer
+Packs directory: C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs
+Start pack: 0001
+End pack: 0002
+
+Packs to infer:
+- pack_0001: manifest @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/manifest.json, response C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/response.json, frames 32
+- pack_0002: manifest @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/manifest.json, response C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/response.json, frames 32
+
+Deterministic image inputs:
+pack_0001 image inputs:
+- frame_number 1500, timestamp 25.025s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000001500.jpg
+- frame_number 1560, timestamp 26.026s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000001560.jpg
+- frame_number 1620, timestamp 27.027s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000001620.jpg
+- frame_number 1680, timestamp 28.028s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000001680.jpg
+- frame_number 1740, timestamp 29.029s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000001740.jpg
+- frame_number 1800, timestamp 30.030s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000001800.jpg
+- frame_number 1860, timestamp 31.031s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000001860.jpg
+- frame_number 1920, timestamp 32.032s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000001920.jpg
+- frame_number 1980, timestamp 33.033s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000001980.jpg
+- frame_number 2040, timestamp 34.034s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002040.jpg
+- frame_number 2100, timestamp 35.035s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002100.jpg
+- frame_number 2220, timestamp 37.037s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002220.jpg
+- frame_number 2280, timestamp 38.038s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002280.jpg
+- frame_number 2340, timestamp 39.039s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002340.jpg
+- frame_number 2400, timestamp 40.040s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002400.jpg
+- frame_number 2460, timestamp 41.041s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002460.jpg
+- frame_number 2520, timestamp 42.042s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002520.jpg
+- frame_number 2580, timestamp 43.043s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002580.jpg
+- frame_number 2640, timestamp 44.044s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002640.jpg
+- frame_number 2700, timestamp 45.045s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002700.jpg
+- frame_number 2760, timestamp 46.046s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002760.jpg
+- frame_number 2820, timestamp 47.047s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002820.jpg
+- frame_number 2880, timestamp 48.048s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002880.jpg
+- frame_number 2940, timestamp 49.049s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000002940.jpg
+- frame_number 3000, timestamp 50.050s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000003000.jpg
+- frame_number 3060, timestamp 51.051s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000003060.jpg
+- frame_number 3120, timestamp 52.052s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000003120.jpg
+- frame_number 3180, timestamp 53.053s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000003180.jpg
+- frame_number 3240, timestamp 54.054s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000003240.jpg
+- frame_number 3300, timestamp 55.055s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000003300.jpg
+- frame_number 3360, timestamp 56.056s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000003360.jpg
+- frame_number 3420, timestamp 57.057s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0001/images/frame_000003420.jpg
+pack_0002 image inputs:
+- frame_number 3480, timestamp 58.058s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000003480.jpg
+- frame_number 3540, timestamp 59.059s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000003540.jpg
+- frame_number 3600, timestamp 60.060s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000003600.jpg
+- frame_number 3660, timestamp 61.061s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000003660.jpg
+- frame_number 3720, timestamp 62.062s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000003720.jpg
+- frame_number 3780, timestamp 63.063s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000003780.jpg
+- frame_number 3840, timestamp 64.064s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000003840.jpg
+- frame_number 3900, timestamp 65.065s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000003900.jpg
+- frame_number 3960, timestamp 66.066s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000003960.jpg
+- frame_number 4020, timestamp 67.067s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004020.jpg
+- frame_number 4080, timestamp 68.068s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004080.jpg
+- frame_number 4140, timestamp 69.069s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004140.jpg
+- frame_number 4200, timestamp 70.070s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004200.jpg
+- frame_number 4260, timestamp 71.071s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004260.jpg
+- frame_number 4320, timestamp 72.072s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004320.jpg
+- frame_number 4440, timestamp 74.074s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004440.jpg
+- frame_number 4500, timestamp 75.075s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004500.jpg
+- frame_number 4560, timestamp 76.076s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004560.jpg
+- frame_number 4620, timestamp 77.077s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004620.jpg
+- frame_number 4680, timestamp 78.078s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004680.jpg
+- frame_number 4740, timestamp 79.079s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004740.jpg
+- frame_number 4800, timestamp 80.080s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004800.jpg
+- frame_number 4860, timestamp 81.081s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004860.jpg
+- frame_number 4920, timestamp 82.082s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004920.jpg
+- frame_number 4980, timestamp 83.083s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000004980.jpg
+- frame_number 5040, timestamp 84.084s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000005040.jpg
+- frame_number 5100, timestamp 85.085s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000005100.jpg
+- frame_number 5160, timestamp 86.086s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000005160.jpg
+- frame_number 5220, timestamp 87.087s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000005220.jpg
+- frame_number 5280, timestamp 88.088s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000005280.jpg
+- frame_number 5340, timestamp 89.089s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000005340.jpg
+- frame_number 5400, timestamp 90.090s, image @C:/Users/neptu/insta360/原视频/VID_20260406_172953_002/infer_calib_32/packs/pack_0002/images/frame_000005400.jpg
+
+Do not run another gemini command.
+Do not infer packs outside this range.
+Use each manifest as the source of truth, inspect the pack images as separate image inputs, and write one response.json per pack.
+After writing response files, run the skill's BOM cleanup script for this exact pack range before reporting completion.
+After writing the response files, report only the response paths, frame counts, and any pack you could not complete.
