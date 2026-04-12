@@ -9,12 +9,29 @@ output/
 output_gemini/
 workspace/jobs/
 deepseek_v3_tokenizer.zip
-.video_data/
 
-# ride-video-infer generated artifacts
+# Core data and temporary artifacts
+.video_data/
 .gemini_temp_bulk/
 .gemini_temp_pack/
 .ride-video-infer-tmp/
+.ride-video-infer-test/
+.codex_backlog*/
+
+# Temporary inference and verify directories
+inference_tmp/
+tmp_batch_infer/
+temp_visualize/
+tmp_verify*/
 infer_calib_*/
+tmpo*/
+
+# Script generated files
+temp.json
+temp_index.json
 gemini_prompt*.txt
 *.frame_decisions.jsonl
+
+inference_tmp/
+temp_visualize/
+tmp_batch_infer/

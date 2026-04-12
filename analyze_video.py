@@ -33,6 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "forced_keep_interval_seconds": 3.0,
         "jpeg_quality": 88,
         "max_frames": 0,
+        "hwaccel": "cuda",
     },
     "filters": {
         "min_blur_score": 80.0,
@@ -424,82 +425,145 @@ def merge_segments(frame_hits: list[dict[str, Any]], duration_seconds: float, co
     return merged
 
 
-def analyze_video(video_path: Path, output_root: Path, config: dict[str, Any], extract_only: bool) -> dict[str, Any]:
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open video: {video_path}")
+import subprocess
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    duration_seconds = frame_count / fps if fps > 0 else 0.0
+
+def get_video_info(video_path: Path) -> tuple[float, int, int, int]:
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=avg_frame_rate,nb_frames,width,height",
+        "-of", "json",
+        str(video_path)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    info = json.loads(result.stdout)["streams"][0]
+    
+    # Handle fractional frame rates like '30000/1001'
+    if "/" in info["avg_frame_rate"]:
+        num, den = map(int, info["avg_frame_rate"].split("/"))
+        fps = num / den
+    else:
+        fps = float(info["avg_frame_rate"])
+        
+    return fps, int(info["nb_frames"]), int(info["width"]), int(info["height"])
+
+
+def analyze_video(video_path: Path, output_root: Path, config: dict[str, Any], extract_only: bool) -> dict[str, Any]:
+    fps, total_frames, width, height = get_video_info(video_path)
+    duration_seconds = total_frames / fps if fps > 0 else 0.0
+    
     sample_fps = float(config["sampling"]["sample_fps"])
     frame_step = max(1, int(round(fps / sample_fps))) if sample_fps > 0 else 1
     max_frames = int(config["sampling"]["max_frames"])
+    hwaccel = config["sampling"].get("hwaccel", "").strip().lower()
 
     video_output = output_root / safe_video_slug(video_path)
     video_output.mkdir(parents=True, exist_ok=True)
     thumbnails_dir = video_output / str(config["project"]["thumbnail_dirname"])
+
+    # Build ffmpeg command for sequential read
+    # Use hardware acceleration if requested (e.g., 'cuda')
+    input_args = []
+    if hwaccel == "cuda":
+        input_args = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        # Note: We use scale_npp or just simple decode depending on availability.
+        # For simplicity and broad compatibility with OpenCV, we'll decode to system memory.
+        input_args = ["-hwaccel", "cuda"]
+
+    cmd = [
+        "ffmpeg",
+        *input_args,
+        "-i", str(video_path),
+        "-f", "image2pipe",
+        "-pix_fmt", "bgr24",
+        "-vcodec", "rawvideo",
+        "-"
+    ]
+
+    logging.info("Starting sequential extraction via ffmpeg (hwaccel=%s)", hwaccel or "none")
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
 
     records: list[dict[str, Any]] = []
     previous_frame: np.ndarray | None = None
     previous_hash: np.ndarray | None = None
     last_forced_timestamp: float | None = None
 
-    sample_indices = list(range(0, max(frame_count, 1), frame_step))
+    sample_indices = list(range(0, total_frames, frame_step))
     if max_frames > 0:
         sample_indices = sample_indices[:max_frames]
-
-    progress = tqdm(sample_indices, desc=video_path.name, unit="frame")
+    
+    sample_set = set(sample_indices)
+    frame_size = width * height * 3
+    
+    progress = tqdm(total=len(sample_indices), desc=video_path.name, unit="frame")
+    
     try:
-        for frame_number in progress:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-            ok, frame = cap.read()
-            if not ok:
-                continue
+        current_frame_idx = 0
+        while True:
+            raw_frame = process.stdout.read(frame_size)
+            if len(raw_frame) != frame_size:
+                break
+            
+            if current_frame_idx in sample_set:
+                frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3))
+                
+                timestamp_seconds = current_frame_idx / fps if fps > 0 else 0.0
+                metrics, current_hash = compute_metrics(frame, previous_frame, previous_hash)
+                candidate = should_send_to_model(metrics, timestamp_seconds, last_forced_timestamp, config)
 
-            timestamp_seconds = frame_number / fps if fps > 0 else 0.0
-            metrics, current_hash = compute_metrics(frame, previous_frame, previous_hash)
-            candidate = should_send_to_model(metrics, timestamp_seconds, last_forced_timestamp, config)
+                record: dict[str, Any] = {
+                    "timestamp_seconds": round(timestamp_seconds, 3),
+                    "timestamp_srt": format_timestamp(timestamp_seconds),
+                    "frame_number": current_frame_idx,
+                    "candidate": candidate,
+                    "blur_score": round(metrics.blur_score, 3),
+                    "frame_diff": round(metrics.frame_diff, 3),
+                    "hash_distance": metrics.hash_distance,
+                    "keep": False,
+                    "score": 0.0,
+                    "labels": [],
+                    "reason": "",
+                    "discard_reason": "",
+                }
 
-            record: dict[str, Any] = {
-                "timestamp_seconds": round(timestamp_seconds, 3),
-                "timestamp_srt": format_timestamp(timestamp_seconds),
-                "frame_number": frame_number,
-                "candidate": candidate,
-                "blur_score": round(metrics.blur_score, 3),
-                "frame_diff": round(metrics.frame_diff, 3),
-                "hash_distance": metrics.hash_distance,
-                "keep": False,
-                "score": 0.0,
-                "labels": [],
-                "reason": "",
-                "discard_reason": "",
-            }
+                if candidate:
+                    last_forced_timestamp = timestamp_seconds
+                    if extract_only or not bool(config["ollama"]["enabled"]):
+                        record["keep"] = True
+                        record["score"] = 1.0
+                        record["labels"] = ["candidate"]
+                        record["reason"] = "Candidate frame exported without model inference."
+                        record["thumbnail_path"] = str(save_thumbnail(frame, thumbnails_dir, timestamp_seconds))
+                    else:
+                        try:
+                            image_base64 = encode_frame(frame, int(config["sampling"]["jpeg_quality"]))
+                            decision = sanitize_decision(call_ollama(image_base64, timestamp_seconds, config), config)
+                            record.update(decision)
+                            if record["keep"]:
+                                record["thumbnail_path"] = str(save_thumbnail(frame, thumbnails_dir, timestamp_seconds))
+                        except Exception as exc:  # noqa: BLE001
+                            record["keep"] = False
+                            record["discard_reason"] = f"ollama_error: {exc}"
 
-            if candidate:
-                last_forced_timestamp = timestamp_seconds
-                if extract_only or not bool(config["ollama"]["enabled"]):
-                    record["keep"] = True
-                    record["score"] = 1.0
-                    record["labels"] = ["candidate"]
-                    record["reason"] = "Candidate frame exported without model inference."
-                    record["thumbnail_path"] = str(save_thumbnail(frame, thumbnails_dir, timestamp_seconds))
-                else:
-                    try:
-                        image_base64 = encode_frame(frame, int(config["sampling"]["jpeg_quality"]))
-                        decision = sanitize_decision(call_ollama(image_base64, timestamp_seconds, config), config)
-                        record.update(decision)
-                        if record["keep"]:
-                            record["thumbnail_path"] = str(save_thumbnail(frame, thumbnails_dir, timestamp_seconds))
-                    except Exception as exc:  # noqa: BLE001
-                        record["keep"] = False
-                        record["discard_reason"] = f"ollama_error: {exc}"
+                records.append(record)
+                previous_frame = frame.copy()
+                previous_hash = current_hash
+                progress.update(1)
+                
+                if max_frames > 0 and len(records) >= max_frames:
+                    break
 
-            records.append(record)
-            previous_frame = frame
-            previous_hash = current_hash
+            current_frame_idx += 1
+            # If we've passed all sample indices, we can stop
+            if current_frame_idx > max(sample_indices):
+                break
+                
     finally:
-        cap.release()
+        process.terminate()
+        process.wait()
+        progress.close()
 
     segments = merge_segments(records, duration_seconds, config)
 
@@ -508,7 +572,7 @@ def analyze_video(video_path: Path, output_root: Path, config: dict[str, Any], e
             "source_path": str(video_path),
             "filename": video_path.name,
             "fps": fps,
-            "frame_count": frame_count,
+            "frame_count": total_frames,
             "duration_seconds": round(duration_seconds, 3),
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),

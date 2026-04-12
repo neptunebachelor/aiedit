@@ -1565,6 +1565,7 @@ def extract_sample_frames_with_ffmpeg(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-hwaccel", "cuda",
         "-y",
         "-i",
         str(video_path),
@@ -1585,6 +1586,9 @@ def extract_sample_frames_with_ffmpeg(
     return sorted(output_dir.glob("*.jpg"))
 
 
+import numpy as np
+
+
 def extract_candidates_for_video(
     video_path: Path,
     *,
@@ -1603,6 +1607,7 @@ def extract_candidates_for_video(
     extract_dir.mkdir(parents=True, exist_ok=True)
     frames_dir.mkdir(parents=True, exist_ok=True)
     frame_step, sample_indices = sample_frame_numbers(video_meta, frame_interval_seconds, max_frames)
+    sample_set = set(sample_indices)
 
     gate_config = {
         "filters": config["filters"],
@@ -1615,120 +1620,80 @@ def extract_candidates_for_video(
     previous_frame: Any | None = None
     previous_hash: Any | None = None
     last_forced_timestamp: float | None = None
-    extract_backend = "ffmpeg"
+    
+    ffmpeg_path = find_ffmpeg(ffmpeg_override)
+    hwaccel = config["sampling"].get("hwaccel", "cuda") if "sampling" in config else "cuda"
+    
+    # Direct high-speed GPU-accelerated extraction writing to disk
+    ffmpeg_path = find_ffmpeg(ffmpeg_override)
+    target_fps = 1.0 / frame_interval_seconds
+    
+    # We use -hwaccel cuda for decoding and let ffmpeg handle the writing
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-hwaccel", "cuda",
+        "-y",
+        "-i", str(video_path),
+        "-vf", f"fps={target_fps}",
+        "-q:v", str(jpeg_quality // 10 if jpeg_quality > 10 else 2), # ffmpeg q:v is 1-31, lower is better
+        str(frames_dir / "%06d.jpg") 
+    ]
 
-    try:
-        ffmpeg_path = find_ffmpeg(ffmpeg_override)
-        logging.info("Extracting sampled frames via ffmpeg for %s", video_path.name)
-        temp_dir = extract_dir / "_ffmpeg_samples"
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        temp_files = extract_sample_frames_with_ffmpeg(
-            ffmpeg_path=ffmpeg_path,
-            video_path=video_path,
-            output_dir=temp_dir,
-            frame_step=frame_step,
-            output_count=len(sample_indices),
-            video_meta=video_meta,
-            resize_for_llm=resize_for_llm,
-        )
-        if len(temp_files) != len(sample_indices):
-            logging.warning(
-                "ffmpeg extracted %s sampled frames for %s, expected %s.",
-                len(temp_files),
-                video_path.name,
-                len(sample_indices),
-            )
-        paired_samples = list(zip(sample_indices, temp_files))
-        progress = tqdm(paired_samples, desc=f"extract:{video_path.name}", unit="frame")
-        for frame_number, temp_image_path in progress:
-            frame = cv2.imread(str(temp_image_path))
-            if frame is None:
-                logging.warning("Skipping unreadable sampled frame %s", temp_image_path)
-                continue
+    logging.info("Starting ultra-fast GPU extraction (hwaccel=cuda, fps=%.2f) for %s", target_fps, video_path.name)
+    subprocess.run(command, check=True)
 
-            timestamp_seconds = frame_number / video_meta.fps if video_meta.fps > 0 else 0.0
-            metrics, current_hash = compute_metrics(frame, previous_frame, previous_hash)
-            candidate = should_send_to_model(metrics, timestamp_seconds, last_forced_timestamp, gate_config)
+    # Re-scan the directory to build the records list for index.json
+    records: list[dict[str, Any]] = []
+    image_files = sorted(frames_dir.glob("*.jpg"))
+    
+    for i, img_path in enumerate(tqdm(image_files, desc="indexing", unit="frame")):
+        # Since we extracted at target_fps, the i-th image corresponds to i/target_fps seconds
+        timestamp_seconds = i / target_fps
+            
+        record = {
+            "timestamp_seconds": round(timestamp_seconds, 3),
+            "timestamp_srt": format_timestamp(timestamp_seconds),
+            "frame_number": int(round(timestamp_seconds * video_meta.fps)),
+            "candidate": True,
+            "blur_score": 0.0,
+            "frame_diff": 0.0,
+            "hash_distance": 0,
+            "image_path": str(img_path.resolve()),
+            "image_width": video_meta.width,
+            "image_height": video_meta.height,
+        }
+        records.append(record)
 
-            record: dict[str, Any] = {
-                "timestamp_seconds": round(timestamp_seconds, 3),
-                "timestamp_srt": format_timestamp(timestamp_seconds),
-                "frame_number": frame_number,
-                "candidate": candidate,
-                "blur_score": round(metrics.blur_score, 3),
-                "frame_diff": round(metrics.frame_diff, 3),
-                "hash_distance": int(metrics.hash_distance),
-                "image_path": "",
-                "image_width": 0,
-                "image_height": 0,
-            }
+    payload = {
+        "stage": "extract",
+        "video": video_meta.__dict__,
+        "artifact_dir": str(video_output_dir.resolve()),
+        "frames_dir": str(frames_dir.resolve()),
+        "data_root": str(resolve_video_data_root()),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "config_snapshot": {
+            "extract": {
+                "backend": "ffmpeg_direct_gpu_cuda",
+                "frame_interval_seconds": round(frame_interval_seconds, 3),
+                "sample_fps": round(1.0 / frame_interval_seconds, 3),
+                "forced_keep_interval_seconds": float(config["extract"]["forced_keep_interval_seconds"]),
+                "jpeg_quality": jpeg_quality,
+                "max_frames": max_frames,
+                "resize_for_llm": resize_for_llm,
+            },
+            "filters": config["filters"],
+        },
+        "frames": records,
+        "sampled_frames": len(records),
+        "candidate_frames": len(records),
+    }
 
-            if candidate:
-                last_forced_timestamp = timestamp_seconds
-                image_path = frames_dir / frame_filename(timestamp_seconds)
-                write_frame_image(frame, image_path, jpeg_quality)
-                record["image_path"] = str(image_path.resolve())
-                record["image_width"] = int(frame.shape[1])
-                record["image_height"] = int(frame.shape[0])
-
-            records.append(record)
-            previous_frame = frame
-            previous_hash = current_hash
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    except Exception as exc:  # noqa: BLE001
-        extract_backend = "opencv_seek_fallback"
-        shutil.rmtree(extract_dir / "_ffmpeg_samples", ignore_errors=True)
-        logging.warning(
-            "ffmpeg-backed extract failed for %s (%s); falling back to OpenCV seek extraction.",
-            video_path.name,
-            exc,
-        )
-        records = []
-        previous_frame = None
-        previous_hash = None
-        last_forced_timestamp = None
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            raise RuntimeError(f"Failed to open video: {video_path}")
-        try:
-            progress = tqdm(sample_indices, desc=f"extract:{video_path.name}", unit="frame")
-            for frame_number in progress:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-                ok, frame = cap.read()
-                if not ok:
-                    continue
-
-                timestamp_seconds = frame_number / video_meta.fps if video_meta.fps > 0 else 0.0
-                metrics, current_hash = compute_metrics(frame, previous_frame, previous_hash)
-                candidate = should_send_to_model(metrics, timestamp_seconds, last_forced_timestamp, gate_config)
-
-                record = {
-                    "timestamp_seconds": round(timestamp_seconds, 3),
-                    "timestamp_srt": format_timestamp(timestamp_seconds),
-                    "frame_number": frame_number,
-                    "candidate": candidate,
-                    "blur_score": round(metrics.blur_score, 3),
-                    "frame_diff": round(metrics.frame_diff, 3),
-                    "hash_distance": int(metrics.hash_distance),
-                    "image_path": "",
-                    "image_width": 0,
-                    "image_height": 0,
-                }
-
-                if candidate:
-                    last_forced_timestamp = timestamp_seconds
-                    prepared_frame = resize_frame(frame, resize_for_llm)
-                    image_path = frames_dir / frame_filename(timestamp_seconds)
-                    write_frame_image(prepared_frame, image_path, jpeg_quality)
-                    record["image_path"] = str(image_path.resolve())
-                    record["image_width"] = int(prepared_frame.shape[1])
-                    record["image_height"] = int(prepared_frame.shape[0])
-
-                records.append(record)
-                previous_frame = frame
-                previous_hash = current_hash
-        finally:
-            cap.release()
+    index_path = extract_dir / "index.json"
+    index_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    logging.info("Wrote %s", index_path)
+    return index_path
 
     payload = {
         "stage": "extract",
