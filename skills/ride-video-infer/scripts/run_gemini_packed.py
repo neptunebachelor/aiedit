@@ -115,25 +115,54 @@ def normalize_decision(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def robust_parse_json_array(text: str) -> list[dict[str, Any]] | None:
-    text = text.strip()
-    # Try stripping code fences
-    if "```" in text:
-        match = re.search(r"```(?:json)?\s*(\[.*\])\s*```", text, re.DOTALL)
-        if match:
-            text = match.group(1)
-    
-    # Try finding the first '[' and last ']'
-    start = text.find("[")
-    end = text.rfind("]")
-    if start != -1 and end != -1:
-        json_candidate = text[start : end + 1]
-        try:
-            data = json.loads(json_candidate)
+def robust_parse_decisions(raw_output: str) -> list[dict[str, Any]] | None:
+    """Parse decisions from Gemini CLI JSON output."""
+    try:
+        # 1. First, parse the entire CLI output as JSON
+        cli_payload = json.loads(raw_output)
+        
+        # 2. Extract the model's text response
+        # Gemini CLI usually puts the text in a 'text' or 'content' field depending on version
+        text_content = ""
+        if isinstance(cli_payload, dict):
+            text_content = cli_payload.get("response") or cli_payload.get("text") or cli_payload.get("content") or ""
+        elif isinstance(cli_payload, list):
+            # Sometimes it might return a list of responses
+            for part in cli_payload:
+                if isinstance(part, dict) and "text" in part:
+                    text_content += part["text"]
+        
+        if not text_content:
+            # If we couldn't find a text field, maybe the output WAS just the array?
+            if isinstance(cli_payload, list):
+                return cli_payload
+            return None
+
+        # 3. Clean markdown and extract the JSON array from the text
+        text_content = text_content.strip()
+        if "```" in text_content:
+            match = re.search(r"```(?:json)?\s*(\[.*\])\s*```", text_content, re.DOTALL)
+            if match:
+                text_content = match.group(1)
+        
+        start = text_content.find("[")
+        end = text_content.rfind("]")
+        if start != -1 and end != -1:
+            json_str = text_content[start : end + 1]
+            data = json.loads(json_str)
             if isinstance(data, list):
                 return data
-        except json.JSONDecodeError:
-            pass
+    except Exception:
+        pass
+    
+    # Fallback: Try a brute-force search for an array in the raw string
+    try:
+        match = re.search(r"(\[\s*\{.*\}\s*\])", raw_output, re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+    except Exception:
+        pass
+        
     return None
 
 
@@ -148,7 +177,6 @@ def call_gemini(
     if executable is None:
         raise RuntimeError("Gemini CLI executable was not found on PATH.")
     
-    # Enforcement of --yolo and --output-format json
     cmd = [executable, "--yolo", "--output-format", "json"]
     if model.strip():
         cmd.extend(["--model", model.strip()])
@@ -174,6 +202,9 @@ def call_gemini(
         raise GeminiCLITimeoutError("Gemini CLI timeout")
         
     if process.returncode != 0:
+        # Check if it failed but still produced some JSON (e.g. partial response)
+        if stdout.strip().startswith("{") or stdout.strip().startswith("["):
+            return stdout
         raise GeminiCLIError(f"Gemini failed with {process.returncode}", output=stderr or stdout)
     
     return stdout
@@ -182,9 +213,9 @@ def call_gemini(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--index", required=True)
-    parser.add_argument("--pack-size", type=int, default=26)
-    parser.add_argument("--model", default="gemini-2.5-flash-lite")
-    parser.add_argument("--timeout-seconds", type=int, default=240)
+    parser.add_argument("--pack-size", type=int, default=10)
+    parser.add_argument("--model", default="gemini-2.5-flash")
+    parser.add_argument("--timeout-seconds", type=int, default=300)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -212,37 +243,51 @@ def main() -> int:
         pack_dir = run_dir / f"pack_{pack_num:04d}"
         pack_dir.mkdir(parents=True, exist_ok=True)
         
-        # Prepare prompt
-        img_refs = []
+        # Prepare images
         img_dir = pack_dir / "images"
         img_dir.mkdir(parents=True, exist_ok=True)
-        
-        prompt_lines = [
-            "Use the ride-video-infer skill contract.",
-            "Compare these frames and return a JSON array.",
-            "Keep only strong highlights (score >= 0.65).",
-            "Frames:"
-        ]
-        
         for f in batch:
             src = Path(f["image_path"])
-            dst = img_dir / src.name
-            shutil.copy2(src, dst)
-            prompt_lines.append(f"- Frame {f['frame_number']}, timestamp {f['timestamp_seconds']}s, image @images/{src.name}")
+            shutil.copy2(src, img_dir / src.name)
         
-        prompt_lines.append("\nReturn ONLY a plain JSON array [{\"frame_number\":...}]. No markdown.")
+        prompt_lines = [
+            "Analyze the following motorcycle riding images and return a JSON array containing your decisions.",
+            "CRITICAL INSTRUCTIONS FOR AGENT:",
+            "1. DO NOT USE ANY TOOLS. You already have the images attached. Output the result immediately.",
+            "2. You MUST output exactly one JSON array. Do not include any other text, no markdown blocks, no conversational fillers.",
+            "3. You MUST use the EXACT keys specified below. DO NOT invent your own keys like 'image', 'decision', or 'reasoning'.",
+            "",
+            "Example of the EXACT required output format:",
+            '[{"frame_number": 230, "keep": false, "score": 0.1, "labels": [], "reason": "", "discard_reason": "blurry"}]',
+            "",
+            "Each item in the JSON array must strictly match this exact schema:",
+            '{"frame_number": number, "keep": boolean, "score": number, "labels": string[], "reason": string, "discard_reason": string}',
+            "Instructions for fields:",
+            "- frame_number: MUST be the integer frame number provided in the list.",
+            "- score: Float from 0.0 to 1.0.",
+            "- keep: Set to true ONLY for visually strong, useful, non-duplicate frames that would make good highlights.",
+            "- reason: Brief reason why the frame is kept (or empty if not kept).",
+            "- discard_reason: Brief reason if the frame is discarded.",
+            "Images to analyze:"
+        ]
+        for f in batch:
+            prompt_lines.append(f"- Frame {f['frame_number']}, timestamp {f['timestamp_seconds']}s, image @images/{Path(f['image_path']).name}")
+            
+        prompt_lines.append("\nAnalyze the images above and output the JSON array of decisions now. DO NOT USE TOOLS. OUTPUT EXACTLY ONE JSON ARRAY AND NOTHING ELSE.")
+        
         prompt = "\n".join(prompt_lines)
-        
         log(f"[{pack_num}/{total_packs}] Processing {len(batch)} frames...")
         
         try:
             raw_output = call_gemini(prompt, cwd=pack_dir, model=args.model, timeout_seconds=args.timeout_seconds)
-            decisions = robust_parse_json_array(raw_output)
+            (pack_dir / "raw_output.txt").write_text(raw_output, encoding="utf-8")
+            
+            decisions = robust_parse_decisions(raw_output)
             
             if decisions:
                 normalized = [normalize_decision(d) for d in decisions]
-                # Ensure we have a decision for every frame in batch
                 present = {d["frame_number"] for d in normalized}
+                # Fix missing frames in response
                 for f in batch:
                     if f["frame_number"] not in present:
                         normalized.append({"frame_number": f["frame_number"], "keep": False, "score": 0.0, "labels": [], "reason": "", "discard_reason": "provider_error: missing from output"})
@@ -250,7 +295,7 @@ def main() -> int:
                 write_decision_jsonl(output_path, normalized)
                 log(f"  Done. Kept {sum(1 for d in normalized if d['keep'])} frames.")
             else:
-                log(f"  Error: Failed to parse JSON. Skipping pack.")
+                log(f"  Error: Failed to parse decisions from JSON output. Check {pack_dir / 'raw_output.txt'}")
         except Exception as e:
             log(f"  Error: {e}")
             

@@ -100,11 +100,11 @@ def main() -> int:
 
     prompt_lines = [
         "Read and follow this skill file exactly:",
-        f"@{gemini_path(skill_path)}",
+        f"@{skill_path.as_posix()}",
         "",
         "Task: run the skill's Gemini In-Session Pack Inference Contract for this deterministic pack range.",
         "",
-        f"Skill directory: {gemini_path(skill_path.parent)}",
+        f"Skill directory: {skill_path.parent.as_posix()}",
         f"Packs directory: {gemini_path(packs_dir)}",
         f"Start pack: {start_pack:04d}",
         f"End pack: {end_pack:04d}",
