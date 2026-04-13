@@ -155,10 +155,9 @@ def main() -> int:
     for pack_dir in pack_dirs:
         summary, decisions = validate_pack(pack_dir, min_keep_score=float(args.min_keep_score))
         summaries.append(summary)
-        if summary["valid"]:
-            all_valid_decisions.extend(decisions)
-            if decisions_path:
-                append_jsonl(decisions_path, decisions)
+        all_valid_decisions.extend(decisions)
+        if decisions_path:
+            append_jsonl(decisions_path, decisions)
 
     result = {
         "packs_checked": len(summaries),

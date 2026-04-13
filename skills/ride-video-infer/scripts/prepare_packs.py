@@ -12,17 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-def find_repo_root(start: Path) -> Path:
-    for candidate in [start, *start.parents]:
-        if (candidate / "pipeline.py").exists():
-            return candidate
-    raise RuntimeError("Could not find project root containing pipeline.py")
-
-
-REPO_ROOT = find_repo_root(Path(__file__).resolve())
-sys.path.insert(0, str(REPO_ROOT))
-
-from video_data_paths import infer_dir_from_index, resolve_frame_image_path  # noqa: E402
+# Removed find_repo_root, REPO_ROOT, sys.path.insert, and video_data_paths import
 
 
 def load_candidate_frames(index_path: Path) -> list[dict[str, Any]]:
@@ -58,7 +48,13 @@ def main() -> int:
     total_packs = math.ceil(len(candidate_frames) / pack_size) if candidate_frames else 0
     start_pack = max(1, int(args.start_pack))
     end_pack = int(args.end_pack) if int(args.end_pack) > 0 else total_packs
-    infer_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else infer_dir_from_index(index_path)
+    infer_dir: Path
+    if args.output_dir:
+        infer_dir = Path(args.output_dir).expanduser().resolve()
+    else:
+        # Default to the canonical .video_data video infer directory
+        # which is index_path.parent.parent / "infer"
+        infer_dir = index_path.parent.parent / "infer" 
     packs_dir = infer_dir / "packs"
     prepared: list[dict[str, Any]] = []
 
@@ -84,7 +80,8 @@ def main() -> int:
         images_dir.mkdir(parents=True, exist_ok=True)
         manifest_frames: list[dict[str, Any]] = []
         for frame in pack_frames:
-            source_path = resolve_frame_image_path(frame, index_path=index_path, payload=index_payload)
+            # Directly construct source_path assuming image_path is relative to pack_0013
+            source_path = index_path.parent.parent / frame["image_path"]
             suffix = source_path.suffix or ".jpg"
             frame_number = int(frame["frame_number"])
             copied_path = images_dir / f"frame_{frame_number:09d}{suffix.lower()}"
