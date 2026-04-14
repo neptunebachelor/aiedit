@@ -1053,6 +1053,11 @@ def parse_args() -> argparse.Namespace:
     )
     add_prompt_override_args(infer_parser)
     infer_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    infer_parser.add_argument(
+        "--shutdown",
+        action="store_true",
+        help="Shut down the Windows PC after the infer job completes.",
+    )
 
     review_parser = subparsers.add_parser("review", help="Build a reviewable edit plan and optional preview.")
     review_parser.add_argument("--input", required=True, help="Path to analysis.json, segments.raw.json, or editable JSON.")
@@ -3697,6 +3702,10 @@ def command_infer(args: argparse.Namespace) -> int:
             )
         except KeyboardInterrupt:
             return 130
+    if getattr(args, "shutdown", False):
+        logging.info("Infer job complete. Shutting down in 60 seconds...")
+        import subprocess
+        subprocess.run(["shutdown", "/s", "/t", "60"], check=True)
     return 0
 
 
