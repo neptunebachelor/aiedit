@@ -1018,6 +1018,7 @@ def parse_args() -> argparse.Namespace:
     extract_parser.add_argument("--jpeg-quality", type=int, help="JPEG quality used when writing extracted frames.")
     extract_parser.add_argument("--resize-for-llm", type=int, help="Maximum output dimension for extracted frames.")
     extract_parser.add_argument("--ffmpeg", help="Optional path to ffmpeg executable.")
+    extract_parser.add_argument("--progress-file", help="Optional path for ffmpeg to write machine-readable progress (used by remote server).")
     extract_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     infer_parser = subparsers.add_parser("infer", help="Run vision-model inference over extracted frames.")
@@ -1056,7 +1057,7 @@ def parse_args() -> argparse.Namespace:
     infer_parser.add_argument(
         "--shutdown",
         action="store_true",
-        help="Shut down the Windows PC after the infer job completes.",
+        help="Shut down the machine after the infer job completes.",
     )
 
     review_parser = subparsers.add_parser("review", help="Build a reviewable edit plan and optional preview.")
@@ -1604,6 +1605,7 @@ def extract_candidates_for_video(
     jpeg_quality: int,
     resize_for_llm: int,
     ffmpeg_override: str | None = None,
+    progress_path: str | None = None,
 ) -> Path:
     video_meta = probe_video(video_path)
     video_output_dir = output_root / safe_video_slug(video_path)
@@ -1643,8 +1645,10 @@ def extract_candidates_for_video(
         "-i", str(video_path),
         "-vf", f"fps={target_fps}",
         "-q:v", str(jpeg_quality // 10 if jpeg_quality > 10 else 2), # ffmpeg q:v is 1-31, lower is better
-        str(frames_dir / "%06d.jpg") 
     ]
+    if progress_path:
+        command.extend(["-progress", str(progress_path)])
+    command.append(str(frames_dir / "%06d.jpg"))
 
     logging.info("Starting ultra-fast GPU extraction (hwaccel=cuda, fps=%.2f) for %s", target_fps, video_path.name)
     subprocess.run(command, check=True)
@@ -3645,6 +3649,7 @@ def command_extract(args: argparse.Namespace) -> int:
             jpeg_quality=int(extract_settings["jpeg_quality"]),
             resize_for_llm=int(extract_settings["resize_for_llm"]),
             ffmpeg_override=getattr(args, "ffmpeg", None),
+            progress_path=getattr(args, "progress_file", None),
         )
     return 0
 
@@ -3705,7 +3710,11 @@ def command_infer(args: argparse.Namespace) -> int:
     if getattr(args, "shutdown", False):
         logging.info("Infer job complete. Shutting down in 60 seconds...")
         import subprocess
-        subprocess.run(["shutdown", "/s", "/t", "60"], check=True)
+        import sys
+        if sys.platform == "win32":
+            subprocess.run(["shutdown", "/s", "/t", "60"], check=True)
+        else:
+            subprocess.run(["shutdown", "-h", "+1"], check=True)
     return 0
 
 
