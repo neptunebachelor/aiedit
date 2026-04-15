@@ -30,9 +30,13 @@ from video_data_paths import resolve_video_data_root, safe_video_slug
 app = FastAPI(title="Pipeline Server", version="0.1.0")
 
 TERMINAL_STATUSES = {"finished", "failed"}
+VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".ts"}
 
 # In-memory job store: job_id → state dict
 _jobs: dict[str, dict[str, Any]] = {}
+
+# Set at startup via --videos-dir
+_videos_dir: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -257,15 +261,38 @@ def list_jobs() -> list[JobStatus]:
     return [JobStatus(**j) for j in _jobs.values()]
 
 
+@app.get("/ls/videos")
+def list_videos() -> dict:
+    """List raw video files in the directory configured via --videos-dir."""
+    if _videos_dir is None or not _videos_dir.is_dir():
+        return {"videos": [], "videos_dir": str(_videos_dir)}
+    entries = []
+    for f in sorted(_videos_dir.iterdir()):
+        if f.suffix.lower() in VIDEO_EXTS and f.is_file():
+            entries.append({
+                "name": f.name,
+                "path": str(f),
+                "size_mb": round(f.stat().st_size / 1_048_576, 1),
+            })
+    return {"videos": entries, "videos_dir": str(_videos_dir)}
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    global _videos_dir
+
     parser = argparse.ArgumentParser(description="Lightweight remote infer HTTP server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765)")
+    parser.add_argument("--videos-dir", default=None,
+                        help="Directory of raw video files to expose via GET /ls/videos")
     args = parser.parse_args()
+
+    if args.videos_dir:
+        _videos_dir = Path(args.videos_dir).expanduser().resolve()
 
     uvicorn.run(app, host=args.host, port=args.port)
 
