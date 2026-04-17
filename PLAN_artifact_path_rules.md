@@ -15,6 +15,17 @@
 
 ---
 
+## Rollout Order（硬性顺序，不可颠倒）
+
+`.gitignore` 清理必须最后做，否则护栏未上线期间临时产物会直接污染仓库。
+
+1. **文档层**：新建 `AGENTS.md` + 两个 symlink（步骤 1、2）
+2. **代码合规**：`video_data_paths.py` env 支持 + 入口脚本打印 data_root + 配套单测（步骤 3）、`prepare_packs.py` 恢复 import 头并改走 helper（步骤 4）、`render_highlights.py` 白名单注释（步骤 5）
+3. **护栏**：新增 `tests/test_no_forbidden_paths.py`，本地 / CI `pytest tests/` 全绿（步骤 6）
+4. **清网**：确认步骤 3 只是上面全绿之后，才删 `.gitignore` 里的历史模式（步骤 7）
+
+---
+
 ## 设计决策
 
 - **规则正本**：`AGENTS.md`（Codex 原生读取，也是 de facto 标准）
@@ -68,6 +79,7 @@ GEMINI.md  -> AGENTS.md
 
 ```python
 def resolve_video_data_root(repo_root: Path | None = None, override: str | Path | None = None) -> Path:
+    """Resolve artifact root. Pure resolver — does NOT create the directory."""
     if override:
         return Path(override).expanduser().resolve()
     env_override = os.environ.get("RIDE_VIDEO_DATA_ROOT")
@@ -78,9 +90,44 @@ def resolve_video_data_root(repo_root: Path | None = None, override: str | Path 
 
 需要 `import os`。优先级：函数参数 `override` > 环境变量 > 默认 `<repo>/.video_data/`。
 
-### 4. 修复 `skills/ride-video-infer/scripts/prepare_packs.py:51-57`
+**不在这里 mkdir**：resolver 保持纯函数，加副作用会污染"只想打印路径"这种场景。实际创建由写入点的 `mkdir(parents=True, exist_ok=True)` 负责（例如 `prepare_packs.py:24` 的 `write_json`、各 helper 调用方已有的 `mkdir` 调用）。
 
-原代码（手写路径）：
+**入口脚本打印 data_root**：在 `pipeline.py`、`remote_infer.py`、`infer_server.py` 启动路径里加一行 `logger.info("video data root: %s", resolve_video_data_root())`，让用户能看到 env 是否生效。
+
+**配套测试**（加到 `tests/test_video_data_paths.py`）：
+- `test_env_override_used_when_no_explicit_override`：设置 `RIDE_VIDEO_DATA_ROOT=/tmp/vd_x`，调用无参 `resolve_video_data_root()`，断言返回 `/tmp/vd_x`
+- `test_explicit_override_beats_env`：设置 env 的同时传 `override=/tmp/vd_y`，断言返回 `/tmp/vd_y`
+- `test_env_override_tolerates_nonexistent_path`：env 指向一个不存在的目录，调用 resolver 不抛异常、返回该路径（覆盖"目录不存在时行为"）
+- `test_env_override_expanduser`：env 设 `~/vd_home`，断言返回展开后的绝对路径
+
+### 4. 修复 `skills/ride-video-infer/scripts/prepare_packs.py`
+
+**4a. 恢复 import 头（替换 L15 的墓碑注释）**
+
+当前 L15 是 `# Removed find_repo_root, REPO_ROOT, sys.path.insert, and video_data_paths import` —— 前任删干净了，连占位实现都没留。
+
+**参照来源精确到**：`skills/ride-video-infer/scripts/upload_frame_files.py:16-25`（同目录同款，`run_gemini_packed.py` 里也是这个模板）。把 L15 那行注释替换为：
+
+```python
+def find_repo_root(start: Path) -> Path:
+    for candidate in [start, *start.parents]:
+        if (candidate / "pipeline.py").exists():
+            return candidate
+    raise RuntimeError("Could not find project root containing pipeline.py")
+
+
+REPO_ROOT = find_repo_root(Path(__file__).resolve())
+sys.path.insert(0, str(REPO_ROOT))
+
+from video_data_paths import infer_dir_from_index  # noqa: E402
+```
+
+- `# noqa: E402` 必须带：import 在 `sys.path.insert` 之后触发 flake8 E402。
+- **不要**改用相对 import 或把 `video_data_paths` 塞成 package —— 同目录其他脚本都用这个 sys.path 注入模式，保持一致性比消除重复更重要。
+
+**4b. L51-57 改走 helper**
+
+原代码：
 ```python
 infer_dir: Path
 if args.output_dir:
@@ -91,23 +138,40 @@ else:
     infer_dir = index_path.parent.parent / "infer"
 ```
 
-改用 helper：
+改为：
 ```python
-from video_data_paths import infer_dir_from_index
-...
 if args.output_dir:
     infer_dir = Path(args.output_dir).expanduser().resolve()
 else:
     infer_dir = infer_dir_from_index(index_path)
 ```
 
-注意 import 路径要能从该脚本所在位置解析（`skills/ride-video-infer/scripts/` 下其他脚本已有类似 import，参照它们的做法，`sys.path` 注入或相对 import）。
+删掉注释（helper 名字已经自解释），类型标注可省。
 
 ### 5. `render_highlights.py:582` — 不改代码，加注释
 
 在 `temp_dir = output_video.parent / f"{output_video.stem}_parts"` 上方加一行短注释，说明这是 `AGENTS.md` 白名单里的 ffmpeg concat staging 合法例外、用完即删。只是给后续 AI 编码器看，不改路径。
 
-### 6. 清理 `.gitignore:13-37`
+### 6. 新增护栏：`tests/test_no_forbidden_paths.py`
+
+**目的**：AGENTS.md 是文档，不能自动执行。加一个 pytest 来 fail 任何把禁用路径加进受跟踪文件的提交。
+
+**实现思路**：
+- 用 `subprocess.run(["git", "ls-files"], ...)` 拿所有受跟踪文件
+- 跑一组正则匹配（匹配任意路径段）：
+  - `^tmp_` / `^temp_` / `_tmp/` / `_tmp$`
+  - `^inference_tmp/`、`^\.gemini_temp`、`^\.ride-video-infer-`、`^infer_calib_`、`^tmpo`
+  - 根下的 `temp.json`、`temp_index.json`、`gemini_prompt.*\.txt`、`.*\.frame_decisions\.jsonl`
+- 白名单（硬编码）：
+  - `tests/_tmp/` 下的任何文件（测试隔离）
+  - 以 `.video_data/` 开头的路径（不应该被跟踪，但如果出现就是另一个 bug，该测试不负责拦）
+- 发现违规时 fail，消息包含违规文件列表和建议的替代路径（`video_artifact_dir()` 等）
+
+**注意**：这个测试是仓库扫描，不需要 fixture；会跟 `pytest tests/` 一起跑，CI 自然 gate。
+
+### 7. 清理 `.gitignore:13-37`（**前置依赖：步骤 6 已绿**）
+
+**顺序硬性要求**：先完成步骤 1-6 并确认 `pytest tests/` 全绿，才能动 `.gitignore`。护栏上线前删掉 ignore 规则，等于既无文档拦截又无自动拦截。
 
 保留：`.video_data/`、`workspace/jobs/`、`deepseek_v3_tokenizer.zip`
 
@@ -121,21 +185,26 @@ else:
 - `tmp_verify*/`、`infer_calib_*/`、`tmpo*/`
 - `temp.json`、`temp_index.json`、`gemini_prompt*.txt`、`*.frame_decisions.jsonl`
 
-理由：这些路径在 AGENTS.md 里明确禁止创建，没必要再用 `.gitignore` 兜底；兜底会让"写了也没事"的心理继续存在。
+理由：这些路径在 AGENTS.md 里明确禁止创建、由步骤 6 的 pytest 自动拦，`.gitignore` 兜底反而会让"写了也没事"的心理继续存在。
 
 ---
 
 ## 关键文件一览
 
-| 文件 | 操作 |
-|---|---|
-| `AGENTS.md` | 新建（仓库根） |
-| `CLAUDE.md` | 新建 symlink → `AGENTS.md` |
-| `GEMINI.md` | 新建 symlink → `AGENTS.md` |
-| `video_data_paths.py` | 修改 `resolve_video_data_root`（L19-22），加 `import os` |
-| `skills/ride-video-infer/scripts/prepare_packs.py` | 修改 L51-57，用 `infer_dir_from_index` |
-| `render_highlights.py` | L582 上方加单行注释 |
-| `.gitignore` | 删除 L15-33 的历史模式 |
+| # | 文件 | 操作 |
+|---|---|---|
+| 1 | `AGENTS.md` | 新建（仓库根） |
+| 1 | `CLAUDE.md` | 新建 symlink → `AGENTS.md` |
+| 1 | `GEMINI.md` | 新建 symlink → `AGENTS.md` |
+| 2 | `video_data_paths.py` | 修改 `resolve_video_data_root`（L19-22），加 `import os` 和 docstring |
+| 2 | `tests/test_video_data_paths.py` | 加 4 个 env override 测试 |
+| 2 | `pipeline.py` / `remote_infer.py` / `infer_server.py` | 启动路径 log 一次 data_root |
+| 2 | `skills/ride-video-infer/scripts/prepare_packs.py` | L15 恢复 import 头（参照 `upload_frame_files.py:16-25`），L51-57 改用 `infer_dir_from_index` |
+| 2 | `render_highlights.py` | L582 上方加单行注释 |
+| 3 | `tests/test_no_forbidden_paths.py` | 新建：扫 `git ls-files` 拦截禁用路径 |
+| 4 | `.gitignore` | 删除 L15-33 的历史模式（**护栏绿了才动**） |
+
+（第一列的 # 对应 Rollout Order 的阶段编号。）
 
 ---
 
@@ -191,4 +260,8 @@ else:
 
 5. **AGENTS.md 可读性**：自己通读一遍，确保硬禁令部分清晰、函数引用精确到文件路径和函数名，使其他 AI 工具能立即定位。
 
-6. **.gitignore 无误删**：`.video_data/`、`workspace/jobs/`、`__pycache__/`、`.venv/`、`.env`、`output/`、`output_gemini/` 等仍在。
+6. **护栏生效**：临时在一个 feature 分支上 `mkdir tmp_probe && echo x > tmp_probe/x.txt && git add -f tmp_probe/x.txt`，跑 `pytest tests/test_no_forbidden_paths.py`，**期望 fail 且错误消息指向 `tmp_probe/x.txt`**；回滚这笔改动后再跑一次应当 pass。
+
+7. **.gitignore 无误删**：`.video_data/`、`workspace/jobs/`、`__pycache__/`、`.venv/`、`.env`、`output/`、`output_gemini/` 等仍在。
+
+8. **三端实际读到同一份规则**：分别用 Claude Code、Codex、Gemini CLI 在仓库根 open 一个对话，问"artifact 应该放哪"，三者的回答都应该命中 AGENTS.md 里的 `.video_data/` 规则；若某端读不到 symlink，回退为该端专属文件改成 `@AGENTS.md` 导入或物理复制。
