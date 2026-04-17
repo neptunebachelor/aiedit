@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from video_data_paths import resolve_video_data_root, safe_video_slug
+from video_data_paths import resolve_video_data_root, safe_existing_slug, safe_video_slug
 
 app = FastAPI(title="Pipeline Server", version="0.1.0")
 
@@ -233,7 +233,7 @@ async def create_infer_job(payload: InferJobRequest) -> JobStatus:
         raise HTTPException(status_code=400, detail="Provide exactly one of index_path or slug")
 
     if payload.slug:
-        clean = safe_video_slug(payload.slug)
+        clean = safe_existing_slug(payload.slug)
         index_path = (_data_root or resolve_video_data_root()) / "videos" / clean / "extract" / "index.json"
         if not index_path.is_file():
             raise HTTPException(status_code=404, detail=f"No extracted video with slug: {clean!r}")

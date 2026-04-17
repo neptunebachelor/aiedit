@@ -28,6 +28,12 @@ def safe_video_slug(value: str | Path) -> str:
     return slug or "video"
 
 
+def safe_existing_slug(value: str | Path) -> str:
+    raw = Path(str(value)).name
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._")
+    return slug or "video"
+
+
 def video_artifact_dir(video_path: Path, *, data_root: Path | None = None) -> Path:
     return (data_root or resolve_video_data_root()) / "videos" / safe_video_slug(video_path)
 
