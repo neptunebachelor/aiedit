@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from video_data_paths import resolve_video_data_root, safe_video_slug
+from video_data_paths import resolve_video_data_root, safe_existing_slug, safe_video_slug
 
 app = FastAPI(title="Pipeline Server", version="0.1.0")
 
@@ -38,17 +38,22 @@ _jobs: dict[str, dict[str, Any]] = {}
 # Set at startup via --videos-dir
 _videos_dir: Path | None = None
 
+# Set at startup via --data-root (or auto-detected); used by /ls/extracted and slug resolution
+_data_root: Path | None = None
+
 
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
 
 class ExtractJobRequest(BaseModel):
-    video_path: str = Field(..., description="Absolute path to the video file on this PC")
+    video_path: str | None = Field(None, description="Absolute path to the video file on this PC")
+    video_name: str | None = Field(None, description="Filename inside --videos-dir on this PC")
 
 
 class InferJobRequest(BaseModel):
-    index_path: str = Field(..., description="Absolute path to extract/index.json on this PC")
+    index_path: str | None = Field(None, description="Absolute path to extract/index.json on this PC")
+    slug: str | None = Field(None, description="Slug of an already-extracted video on this PC")
     shutdown: bool = Field(False, description="Shut down the PC after infer completes")
 
 
@@ -183,8 +188,28 @@ def healthz() -> dict:
 
 @app.post("/extract-jobs", response_model=JobStatus, status_code=202)
 async def create_extract_job(payload: ExtractJobRequest) -> JobStatus:
-    if not Path(payload.video_path).is_file():
-        raise HTTPException(status_code=422, detail=f"video_path not found: {payload.video_path}")
+    # Resolve video_path: exactly one of video_path / video_name must be provided
+    if bool(payload.video_path) == bool(payload.video_name):
+        raise HTTPException(status_code=400, detail="Provide exactly one of video_path or video_name")
+
+    if payload.video_name:
+        if _videos_dir is None:
+            raise HTTPException(status_code=400, detail="Server has no --videos-dir configured")
+        name = payload.video_name
+        if "/" in name or ".." in name:
+            raise HTTPException(status_code=400, detail="video_name must not contain path separators")
+        resolved = (_videos_dir / name).resolve()
+        if not resolved.is_relative_to(_videos_dir):
+            raise HTTPException(status_code=400, detail="video_name resolves outside videos-dir")
+        if resolved.suffix.lower() not in VIDEO_EXTS:
+            raise HTTPException(status_code=400, detail=f"Not a video file: {name}")
+        if not resolved.is_file():
+            raise HTTPException(status_code=400, detail=f"video_name not found: {name}")
+        video_path = str(resolved)
+    else:
+        video_path = payload.video_path
+        if not Path(video_path).is_file():
+            raise HTTPException(status_code=422, detail=f"video_path not found: {video_path}")
 
     job_id = str(uuid.uuid4())
     _jobs[job_id] = {
@@ -196,16 +221,26 @@ async def create_extract_job(payload: ExtractJobRequest) -> JobStatus:
         "result": None,
     }
 
-    asyncio.create_task(_run_extract(job_id, payload.video_path))
+    asyncio.create_task(_run_extract(job_id, video_path))
 
     return JobStatus(**_jobs[job_id])
 
 
 @app.post("/infer-jobs", response_model=JobStatus, status_code=202)
 async def create_infer_job(payload: InferJobRequest) -> JobStatus:
-    index_path = Path(payload.index_path)
-    if not index_path.is_file():
-        raise HTTPException(status_code=422, detail=f"index_path not found: {payload.index_path}")
+    # Resolve index_path: exactly one of index_path / slug must be provided
+    if bool(payload.index_path) == bool(payload.slug):
+        raise HTTPException(status_code=400, detail="Provide exactly one of index_path or slug")
+
+    if payload.slug:
+        clean = safe_existing_slug(payload.slug)
+        index_path = (_data_root or resolve_video_data_root()) / "videos" / clean / "extract" / "index.json"
+        if not index_path.is_file():
+            raise HTTPException(status_code=404, detail=f"No extracted video with slug: {clean!r}")
+    else:
+        index_path = Path(payload.index_path)
+        if not index_path.is_file():
+            raise HTTPException(status_code=422, detail=f"index_path not found: {payload.index_path}")
 
     try:
         index_data = json.loads(index_path.read_text(encoding="utf-8"))
@@ -223,7 +258,7 @@ async def create_infer_job(payload: InferJobRequest) -> JobStatus:
         "result": None,
     }
 
-    asyncio.create_task(_run_infer(job_id, payload.index_path, video_path, payload.shutdown))
+    asyncio.create_task(_run_infer(job_id, str(index_path), video_path, payload.shutdown))
 
     return JobStatus(**_jobs[job_id])
 
@@ -277,22 +312,63 @@ def list_videos() -> dict:
     return {"videos": entries, "videos_dir": str(_videos_dir)}
 
 
+def _scan_extracted(data_root: Path) -> list[dict]:
+    videos_dir = data_root / "videos"
+    if not videos_dir.is_dir():
+        return []
+    entries = []
+    for slug_dir in sorted(videos_dir.iterdir()):
+        if not slug_dir.is_dir():
+            continue
+        index_path = slug_dir / "extract" / "index.json"
+        if not index_path.is_file():
+            continue
+        source_path, frame_count = "-", 0
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+            source_path = (payload.get("video") or {}).get("source_path") or "-"
+            frame_count = len(payload.get("frames") or [])
+        except Exception:
+            pass
+        has_infer = (slug_dir / "infer").is_dir() and any((slug_dir / "infer").iterdir())
+        entries.append({
+            "slug": slug_dir.name,
+            "frames": frame_count,
+            "has_infer": has_infer,
+            "source_path": source_path,
+            "index_path": str(index_path),
+        })
+    return entries
+
+
+@app.get("/ls/extracted")
+def list_extracted() -> dict:
+    """List already-extracted videos in the server's data root."""
+    root = _data_root or resolve_video_data_root()
+    return {"data_root": str(root), "extracted": _scan_extracted(root)}
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    global _videos_dir
+    global _videos_dir, _data_root
 
     parser = argparse.ArgumentParser(description="Lightweight remote infer HTTP server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765)")
     parser.add_argument("--videos-dir", default=None,
                         help="Directory of raw video files to expose via GET /ls/videos")
+    parser.add_argument("--data-root", default=None,
+                        help="Path to .video_data root (default: auto-detect from repo)")
     args = parser.parse_args()
 
     if args.videos_dir:
         _videos_dir = Path(args.videos_dir).expanduser().resolve()
+
+    _data_root = Path(args.data_root).expanduser().resolve() if args.data_root \
+                 else resolve_video_data_root()
 
     uvicorn.run(app, host=args.host, port=args.port)
 
