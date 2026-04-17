@@ -2,12 +2,22 @@
 Remote pipeline client — run on Pi / Mac to trigger jobs on the home PC over LAN.
 
 Usage:
-    # Extract frames from a video
-    python remote_infer.py extract \\
-        --host 192.168.1.100:8765 \\
-        --video "/abs/path/on/pc/videos/ride01.mp4"
+    # List raw videos on the PC
+    python remote_infer.py ls --host 192.168.1.100:8765
 
-    # Run inference on extracted frames
+    # Extract frames by filename (no abs path needed)
+    python remote_infer.py extract --host 192.168.1.100:8765 --name ride01.mp4
+
+    # Extract frames by absolute path (existing)
+    python remote_infer.py extract --host 192.168.1.100:8765 --video /abs/path/ride01.mp4
+
+    # List already-extracted videos on the PC
+    python remote_infer.py ls --host 192.168.1.100:8765 --extracted
+
+    # Run inference by slug
+    python remote_infer.py infer --host 192.168.1.100:8765 --slug ride01 [--shutdown]
+
+    # Run inference by absolute index path (existing)
     python remote_infer.py infer \\
         --host 192.168.1.100:8765 \\
         --index "/abs/path/on/pc/.video_data/videos/<slug>/extract/index.json" \\
@@ -120,10 +130,11 @@ def _submit_and_stream(base: str, endpoint: str, body: dict, label: str) -> None
 # ---------------------------------------------------------------------------
 
 def cmd_extract(args: argparse.Namespace) -> None:
+    body = {"video_name": args.name} if args.name else {"video_path": args.video}
     _submit_and_stream(
         base=f"http://{args.host}",
         endpoint="extract-jobs",
-        body={"video_path": args.video},
+        body=body,
         label="Extract",
     )
 
@@ -131,10 +142,12 @@ def cmd_extract(args: argparse.Namespace) -> None:
 def cmd_infer(args: argparse.Namespace) -> None:
     if args.shutdown:
         print("NOTE: PC will shut down after infer completes.")
+    body = {"slug": args.slug} if args.slug else {"index_path": args.index}
+    body["shutdown"] = args.shutdown
     _submit_and_stream(
         base=f"http://{args.host}",
         endpoint="infer-jobs",
-        body={"index_path": args.index, "shutdown": args.shutdown},
+        body=body,
         label="Infer",
     )
 
@@ -142,10 +155,30 @@ def cmd_infer(args: argparse.Namespace) -> None:
 def cmd_ls(args: argparse.Namespace) -> None:
     base = f"http://{args.host}"
     try:
-        data = _get(f"{base}/ls/videos")
+        if args.extracted:
+            data = _get(f"{base}/ls/extracted")
+        else:
+            data = _get(f"{base}/ls/videos")
     except urllib.error.URLError as exc:
         print(f"ERROR: Cannot reach server at {base}: {exc.reason}")
         sys.exit(1)
+
+    if args.extracted:
+        data_root = data.get("data_root", "?")
+        entries = data.get("extracted", [])
+        print(f"Remote data root: {data_root}")
+        if not entries:
+            print("No extracted videos found.")
+            return
+        slug_w = max((len(e["slug"]) for e in entries), default=4)
+        slug_w = max(slug_w, 4)
+        print()
+        print(f"{'SLUG':<{slug_w}}  {'FRAMES':>6}  {'INFER':>5}  SOURCE")
+        print("-" * (slug_w + 2 + 6 + 2 + 5 + 2 + 60))
+        for e in entries:
+            infer = "yes" if e.get("has_infer") else "no"
+            print(f"{e['slug']:<{slug_w}}  {e['frames']:>6}  {infer:>5}  {e['source_path']}")
+        return
 
     videos_dir = data.get("videos_dir", "None")
     videos = data.get("videos", [])
@@ -226,17 +259,23 @@ def main() -> None:
     # extract subcommand
     p_extract = sub.add_parser("extract", help="Extract frames from a video on the PC")
     p_extract.add_argument("--host", required=True, help="PC address:port, e.g. 192.168.1.100:8765")
-    p_extract.add_argument("--video", required=True, help="Absolute path to video ON THE PC")
+    mx_extract = p_extract.add_mutually_exclusive_group(required=True)
+    mx_extract.add_argument("--video", help="Absolute path to video ON THE PC")
+    mx_extract.add_argument("--name", help="Filename under the server's --videos-dir")
 
     # infer subcommand
     p_infer = sub.add_parser("infer", help="Run inference on extracted frames on the PC")
     p_infer.add_argument("--host", required=True, help="PC address:port, e.g. 192.168.1.100:8765")
-    p_infer.add_argument("--index", required=True, help="Absolute path to extract/index.json ON THE PC")
     p_infer.add_argument("--shutdown", action="store_true", help="Shut down the PC after infer completes")
+    mx_infer = p_infer.add_mutually_exclusive_group(required=True)
+    mx_infer.add_argument("--index", help="Absolute path to extract/index.json ON THE PC")
+    mx_infer.add_argument("--slug", help="Slug of an already-extracted video on the PC")
 
     # ls subcommand
-    p_ls = sub.add_parser("ls", help="List raw video files on the remote PC")
+    p_ls = sub.add_parser("ls", help="List video files on the remote PC")
     p_ls.add_argument("--host", required=True, help="PC address:port, e.g. 192.168.1.100:8765")
+    p_ls.add_argument("--extracted", action="store_true",
+                      help="Show already-extracted videos instead of raw files")
 
     # ls-local subcommand
     p_ls_local = sub.add_parser("ls-local", help="List extracted/inferred videos in local .video_data")
