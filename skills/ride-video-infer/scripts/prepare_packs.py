@@ -12,7 +12,17 @@ from pathlib import Path
 from typing import Any
 
 
-# Removed find_repo_root, REPO_ROOT, sys.path.insert, and video_data_paths import
+def find_repo_root(start: Path) -> Path:
+    for candidate in [start, *start.parents]:
+        if (candidate / "pipeline.py").exists():
+            return candidate
+    raise RuntimeError("Could not find project root containing pipeline.py")
+
+
+REPO_ROOT = find_repo_root(Path(__file__).resolve())
+sys.path.insert(0, str(REPO_ROOT))
+
+from video_data_paths import infer_dir_from_index  # noqa: E402
 
 
 def load_candidate_frames(index_path: Path) -> list[dict[str, Any]]:
@@ -48,13 +58,10 @@ def main() -> int:
     total_packs = math.ceil(len(candidate_frames) / pack_size) if candidate_frames else 0
     start_pack = max(1, int(args.start_pack))
     end_pack = int(args.end_pack) if int(args.end_pack) > 0 else total_packs
-    infer_dir: Path
     if args.output_dir:
         infer_dir = Path(args.output_dir).expanduser().resolve()
     else:
-        # Default to the canonical .video_data video infer directory
-        # which is index_path.parent.parent / "infer"
-        infer_dir = index_path.parent.parent / "infer" 
+        infer_dir = infer_dir_from_index(index_path)
     packs_dir = infer_dir / "packs"
     prepared: list[dict[str, Any]] = []
 

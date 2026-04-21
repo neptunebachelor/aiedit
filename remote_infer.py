@@ -251,6 +251,9 @@ def cmd_ls_local(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    from video_data_paths import resolve_video_data_root
+    print(f"[remote_infer] local video data root: {resolve_video_data_root()}", file=sys.stderr)
+
     parser = argparse.ArgumentParser(
         description="Trigger remote pipeline jobs on the PC over LAN."
     )

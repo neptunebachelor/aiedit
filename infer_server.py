@@ -369,6 +369,7 @@ def main() -> None:
 
     _data_root = Path(args.data_root).expanduser().resolve() if args.data_root \
                  else resolve_video_data_root()
+    print(f"[infer_server] video data root: {_data_root}", file=sys.stderr)
 
     uvicorn.run(app, host=args.host, port=args.port)
 

@@ -579,6 +579,7 @@ def render_video(
     scale_height: int | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
+    # AGENTS.md whitelisted exception: one-shot ffmpeg concat staging next to the final mp4, deleted after mux.
     temp_dir = output_video.parent / f"{output_video.stem}_parts"
     temp_dir.mkdir(parents=True, exist_ok=True)
 
