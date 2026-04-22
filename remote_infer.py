@@ -202,7 +202,9 @@ def cmd_ls(args: argparse.Namespace) -> None:
 
 
 def cmd_ls_local(args: argparse.Namespace) -> None:
-    data_root = Path(args.data_root).expanduser().resolve() if args.data_root else Path.cwd() / ".video_data"
+    from video_data_paths import resolve_video_data_root
+
+    data_root = resolve_video_data_root(override=args.data_root)
     videos_dir = data_root / "videos"
 
     print(f"Local data root: {data_root}")
@@ -251,9 +253,6 @@ def cmd_ls_local(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    from video_data_paths import resolve_video_data_root
-    print(f"[remote_infer] local video data root: {resolve_video_data_root()}", file=sys.stderr)
-
     parser = argparse.ArgumentParser(
         description="Trigger remote pipeline jobs on the PC over LAN."
     )
