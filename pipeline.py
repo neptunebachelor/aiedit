@@ -1434,6 +1434,7 @@ def finalize_extract_settings(settings: dict[str, Any]) -> dict[str, Any]:
 
 def configure_logging(level: str) -> None:
     logging.basicConfig(level=getattr(logging, level), format="%(levelname)s: %(message)s")
+    logging.getLogger(__name__).info("video data root: %s", resolve_video_data_root())
 
 
 def resolve_output_root(config: dict[str, Any], override: str | None, video_path: Path | None = None) -> Path:

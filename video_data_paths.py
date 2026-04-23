@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,15 @@ def find_repo_root(start: Path | None = None) -> Path:
 
 
 def resolve_video_data_root(repo_root: Path | None = None, override: str | Path | None = None) -> Path:
+    """Resolve artifact root. Pure resolver — does not create the directory.
+
+    Priority: explicit override arg > RIDE_VIDEO_DATA_ROOT env var > <repo>/.video_data/.
+    """
     if override:
         return Path(override).expanduser().resolve()
+    env_override = os.environ.get("RIDE_VIDEO_DATA_ROOT")
+    if env_override:
+        return Path(env_override).expanduser().resolve()
     return (repo_root or find_repo_root(Path(__file__))).resolve() / ".video_data"
 
 
