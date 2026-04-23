@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover
 
 from analyze_video import (
     DEFAULT_CONFIG as LEGACY_DEFAULT_CONFIG,
+    build_packed_user_prompt,
     build_system_prompt,
     build_user_prompt,
     compute_metrics,
@@ -46,6 +47,7 @@ from analyze_video import (
     merge_segments,
     sanitize_decision,
     should_send_to_model,
+    validate_pack_decisions,
 )
 from create_manual_plan import normalize_segment as normalize_editable_segment
 from render_highlights import (
@@ -123,6 +125,7 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
             "image_transport": "base64",
             "image_url_template": "",
             "json_output": False,
+            "pack_size": 1,
             "extra_body": {
                 "enable_thinking": False,
             },
@@ -138,6 +141,7 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
             "image_transport": "base64",
             "image_url_template": "",
             "json_output": True,
+            "pack_size": 1,
         },
     },
     "prompt": copy.deepcopy(LEGACY_DEFAULT_CONFIG["prompt"]),
@@ -252,6 +256,16 @@ class VisionProvider(Protocol):
         timestamp_seconds: float,
         config: dict[str, Any],
     ) -> dict[str, Any]:
+        ...
+
+
+class PackedVisionProvider(Protocol):
+    def infer_pack(
+        self,
+        frames: list[dict[str, Any]],
+        *,
+        config: dict[str, Any],
+    ) -> list[dict[str, Any]]:
         ...
 
 
@@ -515,6 +529,52 @@ class OpenAICompatibleVisionProvider:
         response = self.client.chat.completions.create(**payload)
         message_content = extract_message_text(response.choices[0].message.content)
         return extract_json_block(message_content)
+
+    def build_packed_chat_payload(
+        self,
+        frames: list[dict[str, Any]],
+        *,
+        prompt_config: dict[str, Any],
+        inline_extra_body: bool = False,
+    ) -> dict[str, Any]:
+        user_content: list[dict[str, Any]] = [
+            {"type": "text", "text": build_packed_user_prompt(prompt_config, frames)}
+        ]
+        for frame in frames:
+            user_content.append(self.build_image_part(frame["image_bytes"], frame.get("image_path")))
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": build_system_prompt(prompt_config)},
+                {"role": "user", "content": user_content},
+            ],
+        }
+        if self.temperature is not None and self.model != "deepseek-reasoner":
+            payload["temperature"] = self.temperature
+        if self.json_output:
+            payload["response_format"] = {"type": "json_object"}
+        if self.extra_body:
+            extra_body = copy.deepcopy(self.extra_body)
+            if inline_extra_body:
+                payload.update(extra_body)
+            else:
+                payload["extra_body"] = extra_body
+        return payload
+
+    def infer_pack(
+        self,
+        frames: list[dict[str, Any]],
+        *,
+        config: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        payload = self.build_packed_chat_payload(frames, prompt_config=config)
+        response = self.client.chat.completions.create(**payload)
+        message_content = extract_message_text(response.choices[0].message.content)
+        parsed = extract_json_block(message_content)
+        raw_decisions = parsed.get("decisions") if isinstance(parsed, dict) else None
+        if not isinstance(raw_decisions, list):
+            raw_decisions = []
+        return validate_pack_decisions(frames, raw_decisions, {"decision": config["selection"]})
 
 
 class OpenAICompatibleBatchVisionProvider(OpenAICompatibleVisionProvider):
@@ -2935,16 +2995,17 @@ def infer_from_extract_index(
     candidate_frames = [frame for frame in payload["frames"] if frame.get("candidate") and frame.get("image_path")]
     existing_decisions = {} if restart else load_checkpoint_decisions(index_path)
     remaining_frames = [frame for frame in candidate_frames if int(frame["frame_number"]) not in existing_decisions]
-    progress = tqdm(
-        remaining_frames,
-        desc=f"infer:{video_info['filename']}",
-        unit="frame",
-        total=len(candidate_frames),
-        initial=len(existing_decisions),
-    )
     selected_route = str(provider_snapshot.get("selected_route", "")).strip()
     selected_provider_config = provider_snapshot.get(selected_route, {}) if selected_route else {}
     min_request_interval_seconds = float(selected_provider_config.get("min_request_interval_seconds", 0.0) or 0.0)
+    pack_size = int(selected_provider_config.get("pack_size", 1) or 1)
+    is_packed = pack_size > 1 and hasattr(provider, "infer_pack")
+    if pack_size > 1 and not is_packed:
+        logging.warning(
+            "pack_size=%d configured but provider %s has no infer_pack; falling back to single-frame.",
+            pack_size,
+            type(provider).__name__,
+        )
     last_request_started_at = 0.0
 
     decisions_by_frame_number: dict[int, dict[str, Any]] = dict(existing_decisions)
@@ -2966,49 +3027,57 @@ def infer_from_extract_index(
     fatal_provider_error: str | None = None
     try:
         with checkpoint_path.open("a", encoding="utf-8") as checkpoint_handle:
-            for frame in progress:
-                image_path = resolve_frame_image_path(frame, index_path=index_path, payload=payload)
-                image_bytes = image_path.read_bytes()
-                should_abort_run = False
-                while True:
-                    if min_request_interval_seconds > 0:
-                        elapsed = time.monotonic() - last_request_started_at
-                        if elapsed < min_request_interval_seconds:
-                            time.sleep(min_request_interval_seconds - elapsed)
-                    last_request_started_at = time.monotonic()
-                    try:
-                        decision = sanitize_decision(
-                            provider.infer(
-                                image_bytes,
-                                image_path=image_path,
-                                timestamp_seconds=float(frame["timestamp_seconds"]),
-                                config=config,
-                            ),
-                            {"decision": config["selection"]},
-                        )
-                        break
-                    except Exception as exc:  # noqa: BLE001
-                        retry_delay = retry_delay_for_exception(exc)
-                        if retry_delay is not None:
-                            logging.warning("Provider rate limited; sleeping %.1fs before retry.", retry_delay)
-                            time.sleep(retry_delay)
-                            continue
-                        fatal, error_summary = is_fatal_provider_exception(exc)
-                        if fatal:
-                            fatal_provider_error = error_summary
-                            should_abort_run = True
-                            logging.warning("Stopping infer after fatal provider error: %s", fatal_provider_error)
+            if is_packed:
+                packs = [remaining_frames[i:i + pack_size] for i in range(0, len(remaining_frames), pack_size)]
+                pack_progress = tqdm(
+                    packs,
+                    desc=f"infer:{video_info['filename']} (pack={pack_size})",
+                    unit="pack",
+                    total=len(packs),
+                )
+                for pack in pack_progress:
+                    pack_payload: list[dict[str, Any]] = []
+                    for frame in pack:
+                        image_path = resolve_frame_image_path(frame, index_path=index_path, payload=payload)
+                        pack_payload.append({
+                            "frame_number": int(frame["frame_number"]),
+                            "timestamp_seconds": float(frame["timestamp_seconds"]),
+                            "image_bytes": image_path.read_bytes(),
+                            "image_path": image_path,
+                        })
+                    should_abort_run = False
+                    decisions: list[dict[str, Any]] = []
+                    while True:
+                        if min_request_interval_seconds > 0:
+                            elapsed = time.monotonic() - last_request_started_at
+                            if elapsed < min_request_interval_seconds:
+                                time.sleep(min_request_interval_seconds - elapsed)
+                        last_request_started_at = time.monotonic()
+                        try:
+                            decisions = provider.infer_pack(pack_payload, config=config)
                             break
-                        decision = provider_error_decision(f"provider_error: {error_summary}")
+                        except Exception as exc:  # noqa: BLE001
+                            retry_delay = retry_delay_for_exception(exc)
+                            if retry_delay is not None:
+                                logging.warning("Provider rate limited; sleeping %.1fs before retry.", retry_delay)
+                                time.sleep(retry_delay)
+                                continue
+                            fatal, error_summary = is_fatal_provider_exception(exc)
+                            if fatal:
+                                fatal_provider_error = error_summary
+                                should_abort_run = True
+                                logging.warning("Stopping infer after fatal provider error: %s", fatal_provider_error)
+                                break
+                            decisions = [provider_error_decision(f"provider_error: {error_summary}") for _ in pack]
+                            break
+                    if should_abort_run:
                         break
-                if should_abort_run:
-                    break
-                decisions_by_frame_number[int(frame["frame_number"])] = decision
-                checkpoint_handle.write(json.dumps(build_decision_record(frame, decision), ensure_ascii=False) + "\n")
-                checkpoint_handle.flush()
-                processed_this_run += 1
-                last_completed_frame = {"frame": frame, "decision": decision}
-                if processed_this_run == 1 or processed_this_run % 10 == 0:
+                    for frame, decision in zip(pack, decisions):
+                        decisions_by_frame_number[int(frame["frame_number"])] = decision
+                        checkpoint_handle.write(json.dumps(build_decision_record(frame, decision), ensure_ascii=False) + "\n")
+                    checkpoint_handle.flush()
+                    processed_this_run += len(pack)
+                    last_completed_frame = {"frame": pack[-1], "decision": decisions[-1]}
                     progress_path = write_sync_progress(
                         index_path,
                         provider_snapshot=provider_snapshot,
@@ -3018,6 +3087,66 @@ def infer_from_extract_index(
                         last_frame=last_completed_frame,
                         status="running",
                     )
+            else:
+                progress = tqdm(
+                    remaining_frames,
+                    desc=f"infer:{video_info['filename']}",
+                    unit="frame",
+                    total=len(candidate_frames),
+                    initial=len(existing_decisions),
+                )
+                for frame in progress:
+                    image_path = resolve_frame_image_path(frame, index_path=index_path, payload=payload)
+                    image_bytes = image_path.read_bytes()
+                    should_abort_run = False
+                    while True:
+                        if min_request_interval_seconds > 0:
+                            elapsed = time.monotonic() - last_request_started_at
+                            if elapsed < min_request_interval_seconds:
+                                time.sleep(min_request_interval_seconds - elapsed)
+                        last_request_started_at = time.monotonic()
+                        try:
+                            decision = sanitize_decision(
+                                provider.infer(
+                                    image_bytes,
+                                    image_path=image_path,
+                                    timestamp_seconds=float(frame["timestamp_seconds"]),
+                                    config=config,
+                                ),
+                                {"decision": config["selection"]},
+                            )
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            retry_delay = retry_delay_for_exception(exc)
+                            if retry_delay is not None:
+                                logging.warning("Provider rate limited; sleeping %.1fs before retry.", retry_delay)
+                                time.sleep(retry_delay)
+                                continue
+                            fatal, error_summary = is_fatal_provider_exception(exc)
+                            if fatal:
+                                fatal_provider_error = error_summary
+                                should_abort_run = True
+                                logging.warning("Stopping infer after fatal provider error: %s", fatal_provider_error)
+                                break
+                            decision = provider_error_decision(f"provider_error: {error_summary}")
+                            break
+                    if should_abort_run:
+                        break
+                    decisions_by_frame_number[int(frame["frame_number"])] = decision
+                    checkpoint_handle.write(json.dumps(build_decision_record(frame, decision), ensure_ascii=False) + "\n")
+                    checkpoint_handle.flush()
+                    processed_this_run += 1
+                    last_completed_frame = {"frame": frame, "decision": decision}
+                    if processed_this_run == 1 or processed_this_run % 10 == 0:
+                        progress_path = write_sync_progress(
+                            index_path,
+                            provider_snapshot=provider_snapshot,
+                            total_candidate_frames=len(candidate_frames),
+                            completed_candidate_frames=len(decisions_by_frame_number),
+                            resumed_candidate_frames=len(existing_decisions),
+                            last_frame=last_completed_frame,
+                            status="running",
+                        )
         if fatal_provider_error:
             progress_path = write_sync_progress(
                 index_path,

@@ -230,21 +230,26 @@ def encode_frame(frame: np.ndarray, jpeg_quality: int) -> str:
     return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
-def build_user_prompt(config: dict[str, Any], timestamp_seconds: float) -> str:
+def _prompt_context_lines(config: dict[str, Any]) -> list[str]:
     prompt_config = config["prompt"]
     positive_labels = ", ".join(resolve_prompt_labels(prompt_config, "positive_labels", "extra_positive_labels"))
     negative_labels = ", ".join(resolve_prompt_labels(prompt_config, "negative_labels", "extra_negative_labels"))
     preset = normalize_prompt_preset(prompt_config.get("preset", "default"))
     preset_instructions = PROMPT_PRESET_USER_APPEND.get(preset, "")
-    sections = [
-        f"Timestamp: {timestamp_seconds:.2f} seconds.",
-        "The image comes from a forward-fixed motorcycle riding video.",
+    lines = [
         f"Positive labels: {positive_labels}.",
         f"Negative labels: {negative_labels}.",
     ]
     if preset_instructions:
-        sections.append(preset_instructions)
-    sections.append(
+        lines.append(preset_instructions)
+    return lines
+
+
+def build_user_prompt(config: dict[str, Any], timestamp_seconds: float) -> str:
+    sections = [
+        f"Timestamp: {timestamp_seconds:.2f} seconds.",
+        "The image comes from a forward-fixed motorcycle riding video.",
+        *_prompt_context_lines(config),
         "Return JSON with this exact schema:\n"
         '{'
         '"keep": true or false, '
@@ -253,6 +258,37 @@ def build_user_prompt(config: dict[str, Any], timestamp_seconds: float) -> str:
         '"reason": "short explanation", '
         '"discard_reason": "short explanation if keep is false"'
         '}\n'
+        "Do not add markdown or commentary.",
+    ]
+    return "\n".join(sections)
+
+
+def build_packed_user_prompt(
+    config: dict[str, Any],
+    frames: list[dict[str, Any]],
+) -> str:
+    sections = [
+        f"You will see {len(frames)} frames from a forward-fixed motorcycle riding video, in order.",
+        *_prompt_context_lines(config),
+        "Frames (use frame_number as the stable identifier in your response):",
+    ]
+    for frame in frames:
+        sections.append(
+            f"  Frame {int(frame['frame_number'])}, t={float(frame['timestamp_seconds']):.2f}s"
+        )
+    sections.append(
+        "Return JSON with this exact schema:\n"
+        '{"decisions": ['
+        '{'
+        '"frame_number": <int>, '
+        '"keep": true or false, '
+        '"score": 0.0 to 1.0, '
+        '"labels": ["label"], '
+        '"reason": "short explanation", '
+        '"discard_reason": "short explanation if keep is false"'
+        '}'
+        ']}\n'
+        "Return exactly one decision per input frame, matching frame_number. "
         "Do not add markdown or commentary."
     )
     return "\n".join(sections)
@@ -345,6 +381,56 @@ def sanitize_decision(decision: dict[str, Any], config: dict[str, Any]) -> dict[
         "reason": reason,
         "discard_reason": discard_reason,
     }
+
+
+def validate_pack_decisions(
+    expected_frames: list[dict[str, Any]],
+    raw_decisions: list[Any],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    expected_numbers = [int(frame["frame_number"]) for frame in expected_frames]
+    expected_set = set(expected_numbers)
+
+    by_frame: dict[int, dict[str, Any]] = {}
+    duplicates: list[int] = []
+    for item in raw_decisions:
+        if not isinstance(item, dict):
+            continue
+        raw_number = item.get("frame_number")
+        try:
+            frame_number = int(raw_number)
+        except (TypeError, ValueError):
+            continue
+        if frame_number not in expected_set:
+            logging.warning("Packed response contains unexpected frame_number=%d; dropping.", frame_number)
+            continue
+        if frame_number in by_frame:
+            duplicates.append(frame_number)
+            continue
+        by_frame[frame_number] = sanitize_decision(item, config)
+
+    if duplicates:
+        logging.warning("Packed response had duplicate frame_numbers %s; kept first.", duplicates)
+
+    result: list[dict[str, Any]] = []
+    missing: list[int] = []
+    for frame_number in expected_numbers:
+        decision = by_frame.get(frame_number)
+        if decision is None:
+            missing.append(frame_number)
+            decision = {
+                "keep": False,
+                "score": 0.0,
+                "labels": [],
+                "reason": "",
+                "discard_reason": "provider_error: missing from output",
+            }
+        result.append(decision)
+
+    if missing:
+        logging.warning("Packed response missing frame_numbers %s; filled with provider_error fallback.", missing)
+
+    return result
 
 
 def format_timestamp(seconds: float) -> str:
