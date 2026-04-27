@@ -166,6 +166,72 @@ def robust_parse_decisions(raw_output: str) -> list[dict[str, Any]] | None:
     return None
 
 
+def build_prompt(frames: list[dict[str, Any]]) -> str:
+    lines = [
+        "Analyze the following motorcycle riding images and return a JSON array containing your decisions.",
+        "CRITICAL INSTRUCTIONS FOR AGENT:",
+        "1. DO NOT USE ANY TOOLS. You already have the images attached. Output the result immediately.",
+        "2. You MUST output exactly one JSON array. Do not include any other text, no markdown blocks, no conversational fillers.",
+        "3. You MUST use the EXACT keys specified below. DO NOT invent your own keys like 'image', 'decision', or 'reasoning'.",
+        "",
+        "Example of the EXACT required output format:",
+        '[{"frame_number": 230, "keep": false, "score": 0.1, "labels": [], "reason": "", "discard_reason": "blurry"}]',
+        "",
+        "Each item in the JSON array must strictly match this exact schema:",
+        '{"frame_number": number, "keep": boolean, "score": number, "labels": string[], "reason": string, "discard_reason": string}',
+        "Instructions for fields:",
+        "- frame_number: MUST be the integer frame number provided in the list.",
+        "- score: Float from 0.0 to 1.0.",
+        "- keep: Set to true ONLY for visually strong, useful, non-duplicate frames that would make good highlights.",
+        "- reason: Brief reason why the frame is kept (or empty if not kept).",
+        "- discard_reason: Brief reason if the frame is discarded.",
+        "Images to analyze:",
+    ]
+    for f in frames:
+        lines.append(
+            f"- Frame {f['frame_number']}, timestamp {f['timestamp_seconds']}s, image @images/{Path(f['image_path']).name}"
+        )
+    lines.append("\nAnalyze the images above and output the JSON array of decisions now. DO NOT USE TOOLS. OUTPUT EXACTLY ONE JSON ARRAY AND NOTHING ELSE.")
+    return "\n".join(lines)
+
+
+def stage_pack_images(frames: list[dict[str, Any]], dest_dir: Path) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for f in frames:
+        src = Path(f["image_path"])
+        shutil.copy2(src, dest_dir / src.name)
+
+
+def call_and_parse(
+    frames: list[dict[str, Any]],
+    *,
+    work_dir: Path,
+    model: str,
+    timeout_seconds: int,
+) -> list[dict[str, Any]]:
+    """Stage images under work_dir, call Gemini, parse + normalize.
+    Returns list of normalized decisions (possibly empty if parse failed).
+    Filters out hallucinated frame_numbers not in the requested batch."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    stage_pack_images(frames, work_dir / "images")
+    prompt = build_prompt(frames)
+    raw_output = call_gemini(prompt, cwd=work_dir, model=model, timeout_seconds=timeout_seconds)
+    (work_dir / "raw_output.txt").write_text(raw_output, encoding="utf-8")
+    decisions = robust_parse_decisions(raw_output)
+    if not decisions:
+        return []
+    expected_set = {int(f["frame_number"]) for f in frames}
+    normalized = []
+    for d in decisions:
+        try:
+            n = normalize_decision(d)
+        except (KeyError, ValueError, TypeError):
+            continue
+        if n["frame_number"] in expected_set:
+            normalized.append(n)
+    return normalized
+
+
 def call_gemini(
     prompt: str,
     *,
@@ -213,7 +279,7 @@ def call_gemini(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--index", required=True)
-    parser.add_argument("--pack-size", type=int, default=10)
+    parser.add_argument("--pack-size", type=int, default=8)
     parser.add_argument("--model", default="gemini-2.5-flash")
     parser.add_argument("--timeout-seconds", type=int, default=300)
     parser.add_argument("--apply", action="store_true")
@@ -241,61 +307,50 @@ def main() -> int:
         batch = remaining[i * args.pack_size : (i + 1) * args.pack_size]
         pack_num = i + 1
         pack_dir = run_dir / f"pack_{pack_num:04d}"
-        pack_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Prepare images
-        img_dir = pack_dir / "images"
-        img_dir.mkdir(parents=True, exist_ok=True)
-        for f in batch:
-            src = Path(f["image_path"])
-            shutil.copy2(src, img_dir / src.name)
-        
-        prompt_lines = [
-            "Analyze the following motorcycle riding images and return a JSON array containing your decisions.",
-            "CRITICAL INSTRUCTIONS FOR AGENT:",
-            "1. DO NOT USE ANY TOOLS. You already have the images attached. Output the result immediately.",
-            "2. You MUST output exactly one JSON array. Do not include any other text, no markdown blocks, no conversational fillers.",
-            "3. You MUST use the EXACT keys specified below. DO NOT invent your own keys like 'image', 'decision', or 'reasoning'.",
-            "",
-            "Example of the EXACT required output format:",
-            '[{"frame_number": 230, "keep": false, "score": 0.1, "labels": [], "reason": "", "discard_reason": "blurry"}]',
-            "",
-            "Each item in the JSON array must strictly match this exact schema:",
-            '{"frame_number": number, "keep": boolean, "score": number, "labels": string[], "reason": string, "discard_reason": string}',
-            "Instructions for fields:",
-            "- frame_number: MUST be the integer frame number provided in the list.",
-            "- score: Float from 0.0 to 1.0.",
-            "- keep: Set to true ONLY for visually strong, useful, non-duplicate frames that would make good highlights.",
-            "- reason: Brief reason why the frame is kept (or empty if not kept).",
-            "- discard_reason: Brief reason if the frame is discarded.",
-            "Images to analyze:"
-        ]
-        for f in batch:
-            prompt_lines.append(f"- Frame {f['frame_number']}, timestamp {f['timestamp_seconds']}s, image @images/{Path(f['image_path']).name}")
-            
-        prompt_lines.append("\nAnalyze the images above and output the JSON array of decisions now. DO NOT USE TOOLS. OUTPUT EXACTLY ONE JSON ARRAY AND NOTHING ELSE.")
-        
-        prompt = "\n".join(prompt_lines)
         log(f"[{pack_num}/{total_packs}] Processing {len(batch)} frames...")
-        
+
         try:
-            raw_output = call_gemini(prompt, cwd=pack_dir, model=args.model, timeout_seconds=args.timeout_seconds)
-            (pack_dir / "raw_output.txt").write_text(raw_output, encoding="utf-8")
-            
-            decisions = robust_parse_decisions(raw_output)
-            
-            if decisions:
-                normalized = [normalize_decision(d) for d in decisions]
+            normalized = call_and_parse(
+                batch,
+                work_dir=pack_dir,
+                model=args.model,
+                timeout_seconds=args.timeout_seconds,
+            )
+            present = {d["frame_number"] for d in normalized}
+            missing = [f for f in batch if int(f["frame_number"]) not in present]
+
+            if missing:
+                log(f"  {len(missing)} frame(s) missing (likely truncated); retrying as a smaller pack...")
+                retry_dir = pack_dir / "retry"
+                try:
+                    retry_decisions = call_and_parse(
+                        missing,
+                        work_dir=retry_dir,
+                        model=args.model,
+                        timeout_seconds=args.timeout_seconds,
+                    )
+                except Exception as e:
+                    log(f"  Retry call failed: {e}")
+                    retry_decisions = []
+                normalized.extend(retry_decisions)
                 present = {d["frame_number"] for d in normalized}
-                # Fix missing frames in response
-                for f in batch:
-                    if f["frame_number"] not in present:
-                        normalized.append({"frame_number": f["frame_number"], "keep": False, "score": 0.0, "labels": [], "reason": "", "discard_reason": "provider_error: missing from output"})
-                
-                write_decision_jsonl(output_path, normalized)
-                log(f"  Done. Kept {sum(1 for d in normalized if d['keep'])} frames.")
-            else:
-                log(f"  Error: Failed to parse decisions from JSON output. Check {pack_dir / 'raw_output.txt'}")
+                still_missing = [f for f in batch if int(f["frame_number"]) not in present]
+                for f in still_missing:
+                    normalized.append({
+                        "frame_number": int(f["frame_number"]),
+                        "keep": False,
+                        "score": 0.0,
+                        "labels": [],
+                        "reason": "",
+                        "discard_reason": "provider_error: missing after retry",
+                    })
+                if still_missing:
+                    log(f"  Retry recovered {len(retry_decisions)}; {len(still_missing)} fell back to keep=False.")
+                else:
+                    log(f"  Retry recovered all {len(retry_decisions)} missing frames.")
+
+            write_decision_jsonl(output_path, normalized)
+            log(f"  Done. Kept {sum(1 for d in normalized if d['keep'])} frames.")
         except Exception as e:
             log(f"  Error: {e}")
             
