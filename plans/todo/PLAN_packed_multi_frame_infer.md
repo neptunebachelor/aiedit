@@ -8,9 +8,14 @@ Pack **N frames into a single vision chat request** so the model can use within-
 
 Supersedes the Gemini CLI packed prototype at `skills/ride-video-infer/scripts/run_gemini_packed.py`.
 
-**The CLI-wrapping route is dropped.** Wrapping `gemini` CLI (OAuth-bound free tier) into an API and feeding it pipeline traffic violates Gemini CLI / Google Generative AI Additional Terms: the free tier is for interactive personal use, not automated batch. Detection signals are obvious (request cadence, prompt fingerprinting, CLI telemetry, single-account volume) and the worst case is a full Google account suspension — not just API quota loss. Not worth the savings when official Batch APIs already give half-price.
+**The CLI-wrapping route is dropped for production / shared / commercial use.** Wrapping `gemini` CLI (OAuth-bound free tier) into a service-style transport for shared or commercial workloads is out-of-scope of the CLI's intended interactive personal use; sustained automated traffic against a single OAuth account also risks server-side throttling or account-level review. Use the official API for anything beyond a single user's personal pipeline.
 
-The packed *idea* stays. The CLI *transport* goes. All packed inference must go through the official API of whichever provider we route to.
+For **single-user personal use** (the current aiedit case), the CLI transport is permitted but **technically inadequate** — see Phase 0 MVP findings under `PLAN_gemini_schema_harness.md`. Headline issues:
+- ~12% of packs lose decisions to output truncation that no harness can recover.
+- The CLI envelope drops `finish_reason` / `safety_ratings`, so failures are unattributable.
+- Per-frame `keep` decisions flip ~16% across repeats, costing reproducibility.
+
+The packed *idea* stays. The CLI *transport* is acceptable only as a developer-tier prototype for one user; production / shared deployment must go through the official API of whichever provider we route to.
 
 ## Scope
 

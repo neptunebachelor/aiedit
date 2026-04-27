@@ -106,3 +106,43 @@ Cap at 1 repair. Second failure → log + return structured error, don't retry f
 - Gemini CLI headless JSON envelope: https://google-gemini.github.io/gemini-cli/docs/cli/headless.html
 - Existing API JSON call site: `pipeline.py:834`
 - Existing CLI call site: `skills/ride-video-infer/scripts/run_gemini_packed.py:304`
+
+---
+
+## Outcomes (Phase 0 + 1, executed 2026-04-26)
+
+MVP: `skills/ride-video-infer/scripts/mvp_gemini_cli_adherence.py`
+Subject: 30 min ride video, drm-hwaccel CPU extract @ 1fps → 360 candidate frames.
+Two CLI runs, 90 calls each, `gemini-2.5-flash`, `--yolo --output-format json`, no retry / no repair / no babysitting.
+
+### Headline numbers
+
+| Pack size | `validated_ok` (mild harness: fence strip + brute `[...]` extract) | `validated_ok` (strict naked) | Truncated runs | Hallucinated frame_numbers | Pydantic field errors | p50 latency |
+|---|---|---|---|---|---|---|
+| 12 | 87.8% | 80.0% | 10/90 | 1/90 | 0 | 35.4s |
+| 8  | 100%  | 84.4% | 0/90  | 0/90 | 0 | 32.7s |
+
+`mean_per_pack_keep_consistency` (3-repeat agreement): 0.84 (p12), 0.86 (p8). 16% per-frame keep flip rate.
+
+### Findings that contradict the plan above
+
+1. **Red-line table is not applicable here.** Table assumed failures = format drift. In our data, failures are 100% output-budget exhaustion (truncation) — re-prompt or two-pass cannot recover lost content. The right knob is pack size, not harness thickness.
+2. **CLI hidden output cap ≈ 2200 chars (~500-600 tokens).** All p12 truncations land below the largest p12 success (3029 chars). p8 has comfortable headroom and never trips.
+3. **Per-frame keep drift (16%) is a non-issue for this pipeline.** Downstream review aggregates ~30 frames into a 30s window; flip noise washes out at window scale. 3-way voting is over-engineering.
+4. **CLI 0.27 envelope drops `finish_reason`, `safety_ratings`, all `candidates[*]` diagnostics.** Detection of truncation is heuristic-only (response doesn't end with `]` or emitted_count < expected_count). This is a permanent CLI limitation, not a config issue.
+5. **`validated_ok` reported as a single number is misleading** — strict-naked vs. fence-stripped vs. brute-force-extracted give 80 / 88 / 88 at p12. Always report which harness layer each number assumes.
+
+### Decisions taken
+
+- **CLI minimum harness = pack_size 8 + fence strip + retry-on-truncation.** No two-pass, no 3-way voting, no repair-prompt. Implemented in `run_gemini_packed.py` via separate PR.
+- **Phase 2 API path (`response_schema` on `pipeline.py:836`) deferred to backlog.** See `plans/todo/PLAN_gemini_api_response_schema.md`. Marginal value over CLI-at-p8 is now mostly observability, not adherence.
+- **Phase 3 (repair-pass design) dropped.** Not needed at p8.
+- **Phase 4 (observability) reduced to: synthesize a `finish_reason`-equivalent enum from response shape** (`TRUNCATED`, `INCOMPLETE_ARRAY`, `HALLUCINATED_FRAMES`, `SCHEMA_DRIFT`, `OK`). For monitoring only, not for control flow. Deferred until we see a regression.
+
+### Reproducibility
+
+- Raw `runs.jsonl` + `stats.json` + per-call `raw/*.stdout.txt` live at:
+  - p12: `<root>/videos/VID_20260413_160844_002/infer/mvp_runs/20260426T045718Z/`
+  - p8:  `<root>/videos/VID_20260413_160844_002/infer/mvp_runs/20260426T062342Z/`
+- These are **not** committed — they live under `RIDE_VIDEO_DATA_ROOT` (off-repo).
+- Re-running needs: working `gemini` CLI (OAuth-bound), 360+ extracted frames, `python skills/ride-video-infer/scripts/mvp_gemini_cli_adherence.py --index <index.json> --pack-size N --num-packs 30 --repeats 3`.
