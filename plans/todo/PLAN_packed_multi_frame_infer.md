@@ -1,21 +1,17 @@
-# Plan: Packed multi-frame infer via official APIs
+# Plan: Packed multi-frame infer (CLI + official APIs)
 
 ## Goal
 
 Pack **N frames into a single vision chat request** so the model can use within-pack temporal context (motion continuity, duplicate suppression, before/after framing) and so we spend 1 request per N frames instead of N. This is orthogonal to batch pricing — packed + batch compose for ~2x savings on top of ~2x from batch.
 
-## What this replaces
+## Two transports, same shape
 
-Supersedes the Gemini CLI packed prototype at `skills/ride-video-infer/scripts/run_gemini_packed.py`.
+This plan covers **two parallel transports** for the same packed contract:
 
-**The CLI-wrapping route is dropped for production / shared / commercial use.** Wrapping `gemini` CLI (OAuth-bound free tier) into a service-style transport for shared or commercial workloads is out-of-scope of the CLI's intended interactive personal use; sustained automated traffic against a single OAuth account also risks server-side throttling or account-level review. Use the official API for anything beyond a single user's personal pipeline.
+1. **Gemini CLI** (`skills/ride-video-infer/scripts/run_gemini_packed.py`) — the **production path for single-user personal use** (current aiedit case, Douyin-style 30s segment selection). Validated by the Phase 0+1 MVP under `plans/done/PLAN_gemini_schema_harness.md`: at `pack_size=8` + fence-strip + retry-on-truncation, mild-harness `validated_ok = 100%` over 90 calls; per-frame keep drift (~16%) washes out at the 30s window aggregation that downstream review uses. **Currently a standalone script — not yet wired into `pipeline.py`.** Wiring it in (as a `PackedVisionProvider` implementation) is part of this plan.
+2. **Official APIs** (Gemini API, OpenAI-compatible, Ollama) — the **path for production / shared / commercial / multi-tenant use**. The CLI is OAuth-bound to one user and intended for interactive personal use; sustained automated traffic from a service-style wrapper isn't its intended shape and risks server-side throttling. Anything beyond one user's personal pipeline must go through an official API.
 
-For **single-user personal use** (the current aiedit case), the CLI transport is permitted but **technically inadequate** — see Phase 0 MVP findings under `PLAN_gemini_schema_harness.md`. Headline issues:
-- ~12% of packs lose decisions to output truncation that no harness can recover.
-- The CLI envelope drops `finish_reason` / `safety_ratings`, so failures are unattributable.
-- Per-frame `keep` decisions flip ~16% across repeats, costing reproducibility.
-
-The packed *idea* stays. The CLI *transport* is acceptable only as a developer-tier prototype for one user; production / shared deployment must go through the official API of whichever provider we route to.
+Phase 0+1 retired the "CLI is technically inadequate" framing: at `pack_size=8` with the implemented retry harness, the CLI is the right tool for the personal use case. The API path's marginal value over CLI-at-p8 is mostly observability (`finish_reason`, `safety_ratings`) and ToS shape for multi-tenant deployment, not adherence — see `plans/todo/PLAN_gemini_api_response_schema.md`.
 
 ## Scope
 
@@ -48,11 +44,12 @@ class PackedVisionProvider(Protocol):
 
 Implementations:
 
-- `OpenAICompatibleVisionProvider` gets `infer_pack` using the chat-completions multi-image content array (each frame as an `image_url` or inline base64 part).
-- `GeminiVisionProvider` gets `infer_pack` using `contents[].parts[]` with multiple `inline_data` parts.
+- `OpenAICompatibleVisionProvider` gets `infer_pack` (**done** — `pipeline.py:564`) using the chat-completions multi-image content array (each frame as an `image_url` or inline base64 part).
+- **`GeminiCLIPackedVisionProvider` (NEW)** wraps `run_gemini_packed.py`'s pack-call logic (`build_prompt` / `stage_pack_images` / `call_and_parse`) so `pipeline.py` can drive CLI inference end-to-end. Same retry-on-missing-frames semantics as the standalone script.
+- `GeminiVisionProvider` gets `infer_pack` using `contents[].parts[]` with multiple `inline_data` parts (official API path).
 - `OllamaVisionProvider` gets `infer_pack` for local vision models that accept multiple images.
 
-Frames that don't come back in the response get a `provider_error: missing from output` fallback decision (port the recovery logic from `run_gemini_packed.py:287`).
+Frames that don't come back in the response get the recovery the standalone CLI script already does (retry as a smaller pack; remaining missing → `provider_error: missing after retry`). Port that logic when wrapping the CLI; mirror it for the API providers.
 
 ### 2. Prompt contract
 
@@ -83,10 +80,12 @@ This is the biggest implementation subtlety — the batch provider currently ass
 
 ### 5. Rollout phases
 
-1. **Phase 1 — sync single-provider**: implement `infer_pack` for the OpenAI-compatible route (Qwen-VL is a good first target — multi-image input, cheap, official API). `pack_size` configurable, default 1.
-2. **Phase 2 — cross-provider**: add `infer_pack` for Gemini and Ollama, verify on a sample video that `pack_size = 5` gives comparable keep/discard to `pack_size = 1`.
-3. **Phase 3 — packed + batch**: extend `OpenAICompatibleBatchVisionProvider._build_request_record` + `parse_openai_batch_results` to handle pack bodies. Gate behind opt-in config.
-4. **Phase 4 — delete the CLI prototype**: remove `skills/ride-video-infer/scripts/run_gemini_packed.py` once the API-based path matches or beats it on a representative video.
+1. **Phase 1 — sync OpenAI-compatible (DONE)**: `infer_pack` implemented at `pipeline.py:564`. `pack_size` configurable, default 1.
+2. **Phase 2 — wire CLI into pipeline (NEXT, personal-use unblock)**: add `GeminiCLIPackedVisionProvider` that wraps `run_gemini_packed.py`'s pack-call logic and surfaces it as a selectable provider in `pipeline.py infer`. Default `pack_size=8` per Phase 0+1 outcomes. End-to-end target: `pipeline.py infer` on the test video produces `frame_decisions.jsonl` via CLI, and downstream `analyze` / `render` consume it unchanged.
+3. **Phase 3 — cross-provider API packed**: add `infer_pack` for Gemini official API and Ollama. Verify on the same sample video that `pack_size = 8` gives a kept-frame set within tolerance of the CLI run.
+4. **Phase 4 — packed + batch**: extend `OpenAICompatibleBatchVisionProvider._build_request_record` + `parse_openai_batch_results` to handle pack bodies. Gate behind opt-in config.
+
+**Removed:** the previous "Phase 4 — delete the CLI prototype" step. The CLI is the production path for personal use; it stays.
 
 ## Validation
 
@@ -98,12 +97,12 @@ This is the biggest implementation subtlety — the batch provider currently ass
 
 - Multi-turn conversations per video.
 - Passing previous-pack decisions into the next pack (stateful rolling) — out of scope; batch order is not guaranteed.
-- Wrapping any vendor CLI. See top of document.
+- Wrapping a vendor CLI as a multi-tenant / production transport. The CLI provider here is single-user only; multi-tenant routes go through official APIs (Phase 3).
 
 ## Deliverables
 
-- `PackedVisionProvider` protocol + `infer_pack` on at least one OpenAI-compatible route (Phase 1).
-- Config `infer.pack_size` wired end-to-end.
-- Cross-provider packed support (Phase 2).
-- Packed-inside-batch request/response handling (Phase 3).
-- CLI prototype removed (Phase 4).
+- `PackedVisionProvider` protocol + `infer_pack` on the OpenAI-compatible route (Phase 1, **done**).
+- `GeminiCLIPackedVisionProvider` wrapping `run_gemini_packed.py`, selectable in `pipeline.py infer` (Phase 2).
+- Config `infer.pack_size` wired end-to-end (Phase 2).
+- Cross-provider API packed support — Gemini API + Ollama (Phase 3).
+- Packed-inside-batch request/response handling (Phase 4).
