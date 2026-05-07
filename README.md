@@ -83,7 +83,7 @@ python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 The default `infer` route is:
 
 - local Ollama first
-- Gemini 3 Flash next if local inference is unavailable and `GEMINI_API_KEY` is set
+- Gemini next if local inference is unavailable. With `GEMINI_API_KEY`, this uses the official API; without an API key, it can use the local `gemini` CLI packed path when the CLI is on `PATH`
 - Qwen next if Gemini is unavailable and `DASHSCOPE_API_KEY` is set
 - generic OpenAI-compatible API last if it is explicitly configured for vision support
 
@@ -93,6 +93,15 @@ Force Gemini:
 python pipeline.py infer \
   --video ./input/lap01.mp4 \
   --provider gemini
+```
+
+For the personal Gemini CLI path, the default packed request size is 8 frames. Override it per run with `--pack-size`:
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider gemini \
+  --pack-size 8
 ```
 
 Force the generic API route:
@@ -141,6 +150,26 @@ python pipeline.py infer \
 ```
 
 `collect` and `cancel` now support both Gemini and Qwen async manifests.
+
+### One-command background run
+
+`run` executes extract -> infer -> temporal -> review -> render. Add `--viral` for 30-second riding short-video defaults, and `--background` to detach it and write `job.json`, `pid`, `stdout.log`, and `stderr.log` under `.video_data/videos/<slug>/runs/<run_id>/`. The child process updates `job.json` through `running`, `completed`, `failed`, or `interrupted` states:
+
+```bash
+python pipeline.py run \
+  --video ./input/lap01.mp4 \
+  --provider gemini \
+  --viral \
+  --background
+```
+
+When the same video is run again without `--restart`, `run` reuses an existing `extract/index.json`, skips inference if `analysis.json` already exists, and otherwise resumes sync inference from `infer/frame_decisions.checkpoint.jsonl`.
+
+Check the latest background run for a video:
+
+```bash
+python pipeline.py status --video ./input/lap01.mp4
+```
 
 ### Gemini Files API upload-only flow
 

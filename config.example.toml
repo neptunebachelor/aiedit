@@ -85,6 +85,13 @@ supports_vision = true
 supports_async_batch = true
 prefer_async_batch = false
 min_request_interval_seconds = 0.0
+# Official Gemini API stays single-frame by default. When the API key is missing
+# and the local `gemini` CLI is available, pipeline.py can use the personal
+# CLI packed path below instead.
+pack_size = 1
+cli_enabled = true
+cli_model = "gemini-2.5-flash"
+cli_pack_size = 8
 api_base = "https://generativelanguage.googleapis.com/v1beta/openai/"
 model = "gemini-3-flash-preview"
 api_key = ""

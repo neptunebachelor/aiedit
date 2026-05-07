@@ -78,6 +78,7 @@ Under `resolve_video_data_root()`:
 │   ├── analysis.json             # merged analysis
 │   ├── highlights.json           # review/edit plan
 │   ├── debug/                    # prepare_temp_index.py output
+│   ├── runs/                     # background pipeline job manifests + logs
 │   └── staging/                  # optional per-video one-shot staging
 └── frames/<slug>/
     └── frame_*.jpg               # extracted frames
