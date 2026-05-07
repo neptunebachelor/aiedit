@@ -1,117 +1,117 @@
 # Backlog
 
-## Requested Changes
+This file tracks active, user-facing work that is not already complete. Detailed implementation plans live under `plans/todo/`.
 
-### 1. Make provider routing order configurable
+## Priority
 
-Current behavior:
+### P0. Validate one-command background viral run on a real ride video
 
-- provider auto-routing order is hard-coded in `pipeline.py`
-- current order is `local -> gemini -> qwen -> api`
+Why: the CLI path now exists, but the long-term goal is not just plumbing. We need evidence that one command can run unattended, resume cleanly, and produce a usable 30s short-video candidate from real riding footage.
 
-Requested change:
+Target command:
 
-- allow route priority to be configured from project config and/or CLI
-- avoid hard-coding the fallback order in code
+```bash
+python pipeline.py run \
+  --video ./input/lap01.mp4 \
+  --provider gemini \
+  --viral \
+  --background
+```
 
-### 2. Store per-video metadata in the repo-local video data root
+Current state:
 
-Current behavior:
+- `pipeline.py run` chains extract -> infer -> temporal -> review -> render.
+- `--background` writes per-video `runs/<run_id>/job.json`, `pid`, `stdout.log`, and `stderr.log`.
+- `pipeline.py status --video ...` reports latest job state and infer/review progress.
+- rerunning without `--restart` reuses `extract/index.json`, skips infer when `analysis.json` exists, and otherwise resumes from `infer/frame_decisions.checkpoint.jsonl`.
+- `--viral` fills in 30s riding short-video defaults without overriding explicit user options.
+- Gemini CLI packed infer is wired into `pipeline.py` for personal-use runs when the `gemini` CLI is available and API credentials are absent.
 
-- video-processing metadata and derived files default to the repo-local `.video_data` directory
+Remaining work:
 
-Requested change:
+- run the target command on real riding footage and confirm `job.json` reaches `completed`.
+- verify the final MP4, review JSON, editable plan, and SRT outputs are created under the video artifact directory.
+- interrupt and rerun at least once to confirm extract/infer resume behavior on a real artifact tree.
+- inspect the resulting 30s candidate for short-video quality; tune `--viral` defaults, prompt labels, or review settings based on the sample.
 
-- keep video processing metadata out of external source-video directories by default
-- place all per-video metadata and derived artifacts under `<repo_root>/.video_data/videos/<video_slug>`
-- place extracted frame images under `<repo_root>/.video_data/frames/<video_slug>`
+### P1. Finish generic OpenAI-compatible async batch
 
-Desired layout example:
+Why: Gemini and Qwen batch are in place, but generic `api` still falls back to sync even when the endpoint supports the Batch File API.
 
-- source video:
-  `C:\path\to\videos\VID_20260408_172214_010.mp4`
-- artifact folder:
-  `<repo_root>\.video_data\videos\VID_20260408_172214_010\`
+Source plan: `plans/todo/PLAN_multi_provider_batch_infer.md`
 
-This should include:
+Current state:
 
-- extract metadata such as `extract/index.json`
-- extracted frame images
-- checkpoints
-- analysis outputs
-- review/edit plans
-- render plans and rendered videos
+- `GeminiBatchVisionProvider` exists.
+- `OpenAICompatibleBatchVisionProvider` exists and is wired for Qwen.
+- Qwen batch has focused tests.
 
-### 3. Add Qwen Batch support for coarse infer
+Remaining work:
 
-Current behavior:
+- allow `route == "api"` + `submission_mode == "async"` to use `OpenAICompatibleBatchVisionProvider`
+- add `supports_async_batch` / `prefer_async_batch` / optional `extra_body` config for `openai_compatible`
+- make collect/cancel generic instead of Gemini/Qwen-only
+- document verified providers versus opt-in user-verified endpoints
 
-- `qwen` inference currently sends one synchronous `chat/completions` request per candidate frame
-- async batch support is only implemented for `gemini`
-- this makes long-video coarse infer slow and more expensive than necessary
+### P2. Make provider auto-routing order configurable
 
-Project fit:
+Why: current auto-routing is hard-coded as `local -> gemini -> qwen -> api`, which makes fallback policy a code edit instead of a config choice.
 
-- the current coarse infer stage is order-independent per frame
-- requests do not carry rolling model state from prior frames
-- outputs are merged later by `frame_number` / timestamp, so backend execution order does not need to match submission order
+Remaining work:
 
-Requested change:
+- add a config field for route priority, for example `provider.route_order = ["local", "gemini", "qwen", "api"]`
+- optionally add a CLI override
+- validate route names and preserve the current order as the default
+- update CLI help and README docs
 
-- add OpenAI-compatible Batch support for `qwen3.5-plus` and `qwen3.6-plus`
-- keep request/result mapping keyed by frame identity, not response order
-- preserve existing output contracts so downstream temporal/review/render stages do not need to change
-- preserve resume/restart semantics
+### P2. Instrument Gemini CLI image input calibration
 
-Operational notes:
+Why: byte-identical staged files prove local preparation, but not how Gemini CLI/backend actually attaches, resizes, counts, or batches image inputs.
 
-- explicitly set `enable_thinking = false` for coarse filtering workloads unless there is a strong reason not to
-- prefer Batch for long-running coarse infer jobs where latency is less important than throughput and cost
-- Batch pricing is expected to be lower than real-time synchronous calls, but final implementation should verify current platform billing behavior before rollout
+Remaining work:
 
-Temporal constraint:
+- add a calibration path using Gemini API `count_tokens` / usage metadata where available, or Gemini CLI debug logs if usable
+- report number of images attached per prompt
+- report prompt/image token usage and media-resolution behavior when available
+- keep calibration prompts to one pack per prompt by default
 
-- unordered backend batch execution is acceptable only for order-independent coarse infer requests
-- do not use unordered batch execution for future rolling-state or strictly sequential temporal reasoning stages
+### P3. Connect the frontend/backend scaffold to real pipeline data
 
-### 4. Add usable progress reporting for review
+Why: the React review workspace and FastAPI backend exist, but they are still demo/mock surfaces.
 
-Current behavior:
+Current state:
 
-- `review` can run for a long time when generating multiple highlight variants and preview videos
-- current output does not provide a clear high-level progress view for the review stage
-- users mostly see raw `ffmpeg` encoder logs instead of stage progress
+- `frontend/src/lib/api.ts` returns mock review data.
+- `backend/tasks.py` simulates pipeline progress with sleep calls.
 
-Requested change:
+Remaining work:
 
-- add explicit review progress reporting similar to `infer.progress.json`
-- show which variant is being processed and which sub-step is active
-- include preview rendering progress when `--preview` is enabled
-- prefer readable stage progress over raw encoder-only logs
+- replace the demo worker with real extract/infer/review/render invocation
+- expose review outputs through backend endpoints
+- make the frontend load/save real editable plans
+- stream real progress from pipeline progress JSON or backend job state
 
-Suggested visibility:
+### Triggered Backlog. Gemini API `response_schema`
 
-- total variants
-- current variant index
-- current sub-step such as `build_review_outputs`, `render_preview`, or `completed`
-- optional machine-readable progress snapshot file for UI or resume diagnostics
+Source plan: `plans/todo/PLAN_gemini_api_response_schema.md`
 
-### 5. Instrument Gemini CLI image input handling for calibration
+Do this only when one of the plan's pickup triggers fires, such as CLI adherence regression, need for `finish_reason` / `safety_ratings`, or moving from OAuth-bound CLI use to official API use.
 
-Current behavior:
+## Removed From Active Backlog
 
-- `ride-video-infer` can verify that prepared pack images are byte-identical copies of extracted frames
-- validation can prove response shape, duplicate/missing frames, BOM cleanup, and `keep`/score consistency
-- validation cannot prove how Gemini CLI or the Gemini backend internally handles `@image` inputs after upload
+- Artifact path rules and repo-local video data root: completed in `plans/done/PLAN_artifact_path_rules.md`.
+- Qwen Batch support for coarse infer: implemented; remaining generic batch work is tracked as P1 above.
+- Gemini CLI packed infer is wired into `pipeline.py` for the personal-use path, including default pack size 8 and retry-on-missing-frame behavior.
+- One-command background run plumbing is in place: `run --background`, resumable `run`, `status`, and `--viral`.
 
-Open issue:
+### Section D. Review progress reporting
 
-- determine whether Gemini CLI sends all `@image` inputs in one backend model request or splits/uploads/caches them behind the scenes
-- determine what image preprocessing happens inside Gemini for these requests, including tile sizing, downscaling, or media-resolution defaults
-- avoid treating local byte-identical image copies as proof that Gemini consumed full-resolution images internally
+Original request: add usable progress reporting for `review`, especially for multi-variant review runs and preview rendering.
 
-Requested change:
+Completion state:
 
-- add an explicit calibration/instrumentation path using either Gemini API `count_tokens`/usage metadata or Gemini CLI debug logs
-- report the actual number of images attached per prompt, prompt token/image token usage when available, and any configured media-resolution behavior
-- keep pack-size calibration prompts one pack per prompt by default so a 26-frame calibration actually tests 26 image references, not a multi-pack range
+- implemented `review.progress.json`
+- added readable `review.progress` stage logging in `pipeline.py`
+- reports variant counts and current sub-steps such as `build_review_outputs`, `render_preview`, and `variant_completed`
+
+This is no longer active backlog work unless a new UI or resume-diagnostics requirement appears.
