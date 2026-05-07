@@ -6,15 +6,19 @@ import shutil
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pipeline
 import video_data_paths
 from analyze_video import build_packed_user_prompt, validate_pack_decisions
 from pipeline import (
     DEFAULT_PIPELINE_CONFIG,
+    GeminiCLIPackedVisionProvider,
     OpenAICompatibleVisionProvider,
+    build_provider,
     infer_from_extract_index,
 )
 
@@ -173,6 +177,91 @@ class OpenAICompatiblePackedPayloadTests(unittest.TestCase):
         self.assertTrue(out[0]["keep"])
         self.assertFalse(out[1]["keep"])
         self.assertTrue(out[2]["keep"])
+
+
+class GeminiCLIPackedProviderTests(unittest.TestCase):
+    def test_infer_pack_retries_missing_frames_and_preserves_order(self) -> None:
+        tmp_dir = _make_temp_dir(self.id().split(".")[-1])
+        try:
+            index_path = tmp_dir / "videos" / "ride01" / "extract" / "index.json"
+            index_path.parent.mkdir(parents=True)
+            image_paths = []
+            for frame_number in range(1, 4):
+                image_path = tmp_dir / "frames" / "ride01" / f"frame_{frame_number:09d}.png"
+                image_path.parent.mkdir(parents=True, exist_ok=True)
+                image_path.write_bytes(PNG_BYTES)
+                image_paths.append(image_path)
+            index_path.write_text(
+                json.dumps({"video": {"filename": "ride01.mp4"}, "frames": []}),
+                encoding="utf-8",
+            )
+            calls: list[tuple[list[int], Path]] = []
+
+            def fake_call_and_parse(frames, *, work_dir, model, timeout_seconds):  # noqa: ANN001
+                calls.append(([int(frame["frame_number"]) for frame in frames], Path(work_dir)))
+                if Path(work_dir).name == "retry":
+                    return [
+                        {
+                            "frame_number": 2,
+                            "keep": False,
+                            "score": 0.2,
+                            "labels": [],
+                            "reason": "",
+                            "discard_reason": "retry discard",
+                        }
+                    ]
+                return [
+                    {
+                        "frame_number": 1,
+                        "keep": True,
+                        "score": 0.9,
+                        "labels": ["bend"],
+                        "reason": "good",
+                        "discard_reason": "",
+                    }
+                ]
+
+            provider = GeminiCLIPackedVisionProvider(model="gemini-test", timeout_seconds=30)
+            frames = [
+                {
+                    "frame_number": frame_number,
+                    "timestamp_seconds": float(frame_number),
+                    "image_path": image_paths[frame_number - 1],
+                    "index_path": index_path,
+                }
+                for frame_number in range(1, 4)
+            ]
+            config = copy.deepcopy(DEFAULT_PIPELINE_CONFIG)
+
+            with (
+                patch.object(pipeline, "load_gemini_cli_packed_module", return_value=SimpleNamespace(call_and_parse=fake_call_and_parse)),
+                patch.object(pipeline, "infer_dir_from_index", return_value=tmp_dir / "videos" / "ride01" / "infer"),
+            ):
+                out = provider.infer_pack(frames, config=config)
+
+            self.assertEqual([call[0] for call in calls], [[1, 2, 3], [2, 3]])
+            self.assertTrue(calls[0][1].as_posix().endswith("/gemini_cli_runs/" + calls[0][1].parent.name + "/pack_0001"))
+            self.assertEqual(len(out), 3)
+            self.assertTrue(out[0]["keep"])
+            self.assertEqual(out[1]["discard_reason"], "retry discard")
+            self.assertFalse(out[2]["keep"])
+            self.assertEqual(out[2]["discard_reason"], "provider_error: missing after retry")
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_build_provider_uses_gemini_cli_when_api_key_is_missing(self) -> None:
+        provider_config = copy.deepcopy(DEFAULT_PIPELINE_CONFIG["provider"])
+        provider_config["routing"] = "gemini"
+        provider_config["gemini"]["api_key"] = ""
+        provider_config["gemini"]["api_key_env"] = "AIEDIT_TEST_MISSING_GEMINI_KEY"
+
+        with patch.object(pipeline.shutil, "which", return_value="/usr/bin/gemini"):
+            selection = build_provider(provider_config)
+
+        self.assertEqual(selection.provider_type, "gemini_cli")
+        self.assertIsInstance(selection.provider, GeminiCLIPackedVisionProvider)
+        self.assertEqual(selection.snapshot["gemini"]["pack_size"], 8)
+        self.assertEqual(selection.execution_mode, "sync")
 
 
 class InferFromExtractIndexPackedTests(unittest.TestCase):

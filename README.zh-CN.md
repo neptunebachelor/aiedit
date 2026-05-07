@@ -58,6 +58,15 @@ python pipeline.py extract --video ./input/lap01.mp4 --config ./config.track.tom
 python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 ```
 
+自动路由会优先尝试本地 Ollama；如果不可用，会尝试 Gemini。Gemini 有 `GEMINI_API_KEY` 时走官方 API；没有 API key 但本机 `gemini` CLI 在 `PATH` 上时，会走个人使用的 Gemini CLI packed 推理路径，默认每次请求 8 帧：
+
+```bash
+python pipeline.py infer \
+  --video ./input/lap01.mp4 \
+  --provider gemini \
+  --pack-size 8
+```
+
 兼容 OpenAI 的第三方 provider：
 
 ```bash
@@ -97,6 +106,26 @@ input/lap01/
 |-- highlights_30s.final.srt
 |-- highlights_30s.source.srt
 `-- highlights_30s.preview.mp4
+```
+
+## 一条命令后台运行
+
+`run` 会串起 extract -> infer -> temporal -> review -> render。加 `--viral` 会启用 30 秒骑行短视频默认策略；加上 `--background` 后会脱到后台运行，并把 `job.json`、`pid`、`stdout.log`、`stderr.log` 写到 `.video_data/videos/<slug>/runs/<run_id>/`。子进程会持续更新 `job.json` 状态：`running`、`completed`、`failed` 或 `interrupted`：
+
+```bash
+python pipeline.py run \
+  --video ./input/lap01.mp4 \
+  --provider gemini \
+  --viral \
+  --background
+```
+
+断点继续默认开启：同一个视频再次运行且没有 `--restart` 时，`run` 会复用已有 `extract/index.json`；如果 `analysis.json` 已存在会跳过 infer；如果只剩 infer checkpoint，则从 `infer/frame_decisions.checkpoint.jsonl` 继续。
+
+查看某个视频最近一次后台任务：
+
+```bash
+python pipeline.py status --video ./input/lap01.mp4
 ```
 
 预览分辨率支持：

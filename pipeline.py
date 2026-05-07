@@ -4,12 +4,14 @@ import argparse
 import asyncio
 import base64
 import copy
+import importlib.util
 import io
 import json
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -104,6 +106,10 @@ DEFAULT_PIPELINE_CONFIG: dict[str, Any] = {
             "supports_async_batch": True,
             "prefer_async_batch": False,
             "min_request_interval_seconds": 0.0,
+            "pack_size": 1,
+            "cli_enabled": True,
+            "cli_model": "gemini-2.5-flash",
+            "cli_pack_size": 8,
             "api_base": "https://generativelanguage.googleapis.com/v1beta/openai/",
             "model": "gemini-3-flash-preview",
             "api_key": "",
@@ -388,6 +394,23 @@ def safe_filename_stem(value: str) -> str:
     return "".join(char if char.isalnum() or char in allowed else "_" for char in value).strip("._") or "batch"
 
 
+GEMINI_CLI_PACKED_SCRIPT = Path(__file__).resolve().parent / "skills" / "ride-video-infer" / "scripts" / "run_gemini_packed.py"
+_GEMINI_CLI_PACKED_MODULE: Any | None = None
+
+
+def load_gemini_cli_packed_module() -> Any:
+    global _GEMINI_CLI_PACKED_MODULE
+    if _GEMINI_CLI_PACKED_MODULE is not None:
+        return _GEMINI_CLI_PACKED_MODULE
+    spec = importlib.util.spec_from_file_location("aiedit_gemini_cli_packed", GEMINI_CLI_PACKED_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load Gemini CLI packed script: {GEMINI_CLI_PACKED_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _GEMINI_CLI_PACKED_MODULE = module
+    return module
+
+
 class OllamaVisionProvider:
     def __init__(self, *, api_base: str, model: str, temperature: float, timeout_seconds: float) -> None:
         self.api_base = api_base.rstrip("/")
@@ -575,6 +598,104 @@ class OpenAICompatibleVisionProvider:
         if not isinstance(raw_decisions, list):
             raw_decisions = []
         return validate_pack_decisions(frames, raw_decisions, {"decision": config["selection"]})
+
+
+class GeminiCLIPackedVisionProvider:
+    def __init__(self, *, model: str, timeout_seconds: float) -> None:
+        self.model = model.strip()
+        self.timeout_seconds = int(timeout_seconds)
+        self._run_dirs_by_index: dict[str, Path] = {}
+        self._pack_counts_by_index: dict[str, int] = {}
+
+    def infer(
+        self,
+        image_bytes: bytes,
+        *,
+        image_path: Path | None,
+        timestamp_seconds: float,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        raise RuntimeError("Gemini CLI provider only supports packed inference; set pack_size > 1.")
+
+    def _run_dir_for_index(self, index_path: Path) -> Path:
+        index_key = str(index_path.resolve())
+        run_dir = self._run_dirs_by_index.get(index_key)
+        if run_dir is None:
+            run_name = f"pipeline_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}"
+            run_dir = infer_dir_from_index(index_path) / "gemini_cli_runs" / run_name
+            run_dir.mkdir(parents=True, exist_ok=True)
+            self._run_dirs_by_index[index_key] = run_dir
+            self._pack_counts_by_index[index_key] = 0
+        return run_dir
+
+    def _next_pack_dir(self, index_path: Path) -> Path:
+        index_key = str(index_path.resolve())
+        run_dir = self._run_dir_for_index(index_path)
+        self._pack_counts_by_index[index_key] = self._pack_counts_by_index.get(index_key, 0) + 1
+        return run_dir / f"pack_{self._pack_counts_by_index[index_key]:04d}"
+
+    def infer_pack(
+        self,
+        frames: list[dict[str, Any]],
+        *,
+        config: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not frames:
+            return []
+        raw_index_path = frames[0].get("index_path")
+        if raw_index_path is None:
+            raise RuntimeError("Gemini CLI packed inference requires index_path in frame payload.")
+        index_path = Path(str(raw_index_path)).expanduser().resolve()
+        script_frames = [
+            {
+                "frame_number": int(frame["frame_number"]),
+                "timestamp_seconds": float(frame["timestamp_seconds"]),
+                "image_path": str(Path(str(frame["image_path"])).expanduser().resolve()),
+            }
+            for frame in frames
+        ]
+
+        module = load_gemini_cli_packed_module()
+        pack_dir = self._next_pack_dir(index_path)
+        normalized = module.call_and_parse(
+            script_frames,
+            work_dir=pack_dir,
+            model=self.model,
+            timeout_seconds=self.timeout_seconds,
+        )
+        present = {int(decision["frame_number"]) for decision in normalized if "frame_number" in decision}
+        missing = [frame for frame in script_frames if int(frame["frame_number"]) not in present]
+        if missing:
+            logging.warning(
+                "Gemini CLI packed response missed %d frame(s); retrying the missing frames as a smaller pack.",
+                len(missing),
+            )
+            try:
+                retry_decisions = module.call_and_parse(
+                    missing,
+                    work_dir=pack_dir / "retry",
+                    model=self.model,
+                    timeout_seconds=self.timeout_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("Gemini CLI retry failed: %s", summarize_provider_exception(exc))
+                retry_decisions = []
+            normalized.extend(retry_decisions)
+            present = {int(decision["frame_number"]) for decision in normalized if "frame_number" in decision}
+            for frame in script_frames:
+                if int(frame["frame_number"]) not in present:
+                    normalized.append(
+                        {
+                            "frame_number": int(frame["frame_number"]),
+                            "keep": False,
+                            "score": 0.0,
+                            "labels": [],
+                            "reason": "",
+                            "discard_reason": "provider_error: missing after retry",
+                        }
+                    )
+
+        return validate_pack_decisions(frames, normalized, {"decision": config["selection"]})
 
 
 class OpenAICompatibleBatchVisionProvider(OpenAICompatibleVisionProvider):
@@ -1087,7 +1208,7 @@ def parse_args() -> argparse.Namespace:
     infer_parser.add_argument(
         "--provider",
         choices=["auto", "local", "gemini", "qwen", "api"],
-        help="Provider routing for this run. auto prefers local Ollama, then Gemini, then Qwen, then generic API.",
+        help="Provider routing for this run. auto prefers local Ollama, then Gemini API/CLI, then Qwen, then generic API.",
     )
     infer_parser.add_argument("--provider-type", choices=["ollama", "openai_compatible"])
     infer_parser.add_argument("--api-base", help="Provider API base URL.")
@@ -1097,6 +1218,7 @@ def parse_args() -> argparse.Namespace:
     infer_parser.add_argument("--ffmpeg", help="Optional path to ffmpeg executable used if extract runs implicitly.")
     infer_parser.add_argument("--temperature", type=float, help="Sampling temperature for the provider.")
     infer_parser.add_argument("--timeout-seconds", type=float, help="Provider timeout in seconds.")
+    infer_parser.add_argument("--pack-size", type=int, help="Frames per packed vision request for providers that support it.")
     infer_parser.add_argument(
         "--submission-mode",
         choices=["auto", "sync", "async"],
@@ -1218,13 +1340,22 @@ def parse_args() -> argparse.Namespace:
     cancel_parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
     cancel_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
+    status_parser = subparsers.add_parser("status", help="Show background run and stage progress.")
+    status_target = status_parser.add_mutually_exclusive_group(required=True)
+    status_target.add_argument("--job", help="Path to a background run job.json.")
+    status_target.add_argument("--video", help="Video file whose latest background run should be shown.")
+    status_parser.add_argument("--output-root", help="Root directory for pipeline outputs. Defaults to repo-local .video_data.")
+    status_parser.add_argument("--config", default="config.toml", help="Optional TOML config path.")
+    status_parser.add_argument("--json", action="store_true", help="Print raw status JSON.")
+    status_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+
     run_parser = subparsers.add_parser("run", help="Run extract -> infer -> review -> render in one command.")
     add_common_video_args(run_parser)
     run_parser.add_argument("--extract-index", help="Optional extract/index.json. Skips extract when provided.")
     run_parser.add_argument(
         "--provider",
         choices=["auto", "local", "gemini", "qwen", "api"],
-        help="Provider routing for this run. auto prefers local Ollama, then Gemini, then Qwen, then generic API.",
+        help="Provider routing for this run. auto prefers local Ollama, then Gemini API/CLI, then Qwen, then generic API.",
     )
     run_parser.add_argument("--provider-type", choices=["ollama", "openai_compatible"])
     run_parser.add_argument("--api-base", help="Provider API base URL.")
@@ -1233,6 +1364,7 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--model", help="Vision model name.")
     run_parser.add_argument("--temperature", type=float, help="Sampling temperature for the provider.")
     run_parser.add_argument("--timeout-seconds", type=float, help="Provider timeout in seconds.")
+    run_parser.add_argument("--pack-size", type=int, help="Frames per packed vision request for providers that support it.")
     run_parser.add_argument(
         "--submission-mode",
         choices=["auto", "sync", "async"],
@@ -1258,6 +1390,11 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--max-frames", type=int, help="Limit the number of sampled frames.")
     run_parser.add_argument("--jpeg-quality", type=int, help="JPEG quality used when writing extracted frames.")
     run_parser.add_argument("--resize-for-llm", type=int, help="Maximum output dimension for extracted frames.")
+    run_parser.add_argument(
+        "--viral",
+        action="store_true",
+        help="Use 30s short-video defaults for riding highlights without overriding explicit options.",
+    )
     run_parser.add_argument("--target-seconds", type=float, help="Target total duration for the compact plan.")
     run_parser.add_argument(
         "--selection-mode",
@@ -1288,6 +1425,7 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--preset", help="Preset used when encoding intermediate clips.")
     run_parser.add_argument("--ffmpeg", help="Optional path to ffmpeg executable.")
     run_parser.add_argument("--skip-review", action="store_true", help="Render directly from analysis.json.")
+    run_parser.add_argument("--background", action="store_true", help="Start this run in the background and write logs under the video artifact directory.")
     run_parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     temporal_parser = subparsers.add_parser(
@@ -1378,6 +1516,22 @@ def apply_prompt_overrides(config: dict[str, Any], args: argparse.Namespace) -> 
         prompt["extra_negative_labels"] = extra_negative
     if getattr(args, "prompt_extra_instructions", None):
         prompt["extra_instructions"] = str(args.prompt_extra_instructions).strip()
+
+
+def apply_viral_run_defaults(args: argparse.Namespace) -> None:
+    if not bool(getattr(args, "viral", False)):
+        return
+    defaults = {
+        "target_seconds": 30.0,
+        "selection_mode": "single_continuous",
+        "single_top_k": 5,
+        "caption_mode": "human",
+        "caption_style": "douyin",
+        "prompt_preset": "douyin_riding",
+    }
+    for key, value in defaults.items():
+        if getattr(args, key, None) is None:
+            setattr(args, key, value)
 
 
 def load_toml(path: Path) -> dict[str, Any]:
@@ -1819,6 +1973,7 @@ def resolve_provider_config(config: dict[str, Any], args: argparse.Namespace) ->
             provider["gemini"]["api_base"] = args.api_base
         if getattr(args, "model", None):
             provider["gemini"]["model"] = args.model
+            provider["gemini"]["cli_model"] = args.model
         if getattr(args, "api_key", None):
             provider["gemini"]["api_key"] = args.api_key
         if getattr(args, "api_key_env", None):
@@ -1841,6 +1996,21 @@ def resolve_provider_config(config: dict[str, Any], args: argparse.Namespace) ->
             provider["openai_compatible"]["api_key"] = args.api_key
         if getattr(args, "api_key_env", None):
             provider["openai_compatible"]["api_key_env"] = args.api_key_env
+    if getattr(args, "pack_size", None) is not None:
+        pack_size = int(args.pack_size)
+        if pack_size < 1:
+            raise ValueError(f"pack_size must be >= 1, got {pack_size}")
+        target = provider_target or str(provider.get("routing", "auto")).strip().lower()
+        if target in {"local", "gemini", "qwen"}:
+            provider[target if target != "local" else "ollama"]["pack_size"] = pack_size
+            if target == "gemini":
+                provider["gemini"]["cli_pack_size"] = pack_size
+        elif target == "api":
+            provider["openai_compatible"]["pack_size"] = pack_size
+        elif target == "auto":
+            for key in ("gemini", "qwen", "openai_compatible"):
+                provider[key]["pack_size"] = pack_size
+            provider["gemini"]["cli_pack_size"] = pack_size
     return provider
 
 
@@ -1939,6 +2109,30 @@ def validate_remote_provider(route: str, remote_config: dict[str, Any]) -> tuple
     if not api_base or not model:
         return False, f"{route} unavailable (missing api_base or model)", ""
     return True, "", api_key
+
+
+def validate_gemini_cli_provider(gemini_config: dict[str, Any]) -> tuple[bool, str]:
+    if not bool(gemini_config.get("enabled", True)):
+        return False, "gemini disabled"
+    if not bool(gemini_config.get("cli_enabled", True)):
+        return False, "gemini cli disabled"
+    if shutil.which("gemini") is None:
+        return False, "gemini cli unavailable (executable not found on PATH)"
+    model = str(gemini_config.get("cli_model") or gemini_config.get("model") or "").strip()
+    if not model:
+        return False, "gemini cli unavailable (missing model)"
+    return True, ""
+
+
+def build_gemini_cli_provider(
+    gemini_config: dict[str, Any],
+    *,
+    timeout_seconds: float,
+) -> GeminiCLIPackedVisionProvider:
+    return GeminiCLIPackedVisionProvider(
+        model=str(gemini_config.get("cli_model") or gemini_config.get("model") or "").strip(),
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def build_openai_compatible_provider(
@@ -2079,10 +2273,34 @@ def build_provider(provider_config: dict[str, Any]) -> ProviderSelection:
         else:
             remote_config = api_config
         valid, failure, _ = validate_remote_provider(route, remote_config)
+        execution_mode = resolve_execution_mode(route, provider_config, remote_config)
         if not valid:
+            if route == "gemini" and execution_mode == "sync":
+                cli_valid, cli_failure = validate_gemini_cli_provider(remote_config)
+                if cli_valid:
+                    cli_snapshot = sanitize_provider_snapshot(
+                        provider_config,
+                        route=route,
+                        provider_type="gemini_cli",
+                    )
+                    cli_pack_size = int(remote_config.get("cli_pack_size") or remote_config.get("pack_size") or 8)
+                    cli_snapshot["gemini"]["pack_size"] = max(1, cli_pack_size)
+                    cli_snapshot["gemini"]["model"] = str(remote_config.get("cli_model") or remote_config.get("model") or "").strip()
+                    return ProviderSelection(
+                        route=route,
+                        provider_type="gemini_cli",
+                        profile=str(remote_config.get("cli_model") or remote_config.get("model") or "gemini_cli").strip(),
+                        provider=build_gemini_cli_provider(
+                            remote_config,
+                            timeout_seconds=timeout_seconds,
+                        ),
+                        snapshot=cli_snapshot,
+                        execution_mode=execution_mode,
+                    )
+                failures.append(f"{failure}; {cli_failure}")
+                continue
             failures.append(failure)
             continue
-        execution_mode = resolve_execution_mode(route, provider_config, remote_config)
         if route == "gemini" and execution_mode == "async_batch":
             provider_instance = build_gemini_batch_provider(
                 remote_config,
@@ -2176,6 +2394,8 @@ def is_fatal_provider_exception(exc: Exception) -> tuple[bool, str]:
         "not support image",
         "not support vision",
         "invalid_request_error",
+        "gemini cli executable was not found",
+        "executable not found on path",
     ]
     if status_code in {400, 401, 402, 403, 404}:
         return True, summarize_provider_exception(exc)
@@ -2999,7 +3219,7 @@ def infer_from_extract_index(
     selected_provider_config = provider_snapshot.get(selected_route, {}) if selected_route else {}
     min_request_interval_seconds = float(selected_provider_config.get("min_request_interval_seconds", 0.0) or 0.0)
     pack_size = int(selected_provider_config.get("pack_size", 1) or 1)
-    is_packed = pack_size > 1 and hasattr(provider, "infer_pack")
+    is_packed = hasattr(provider, "infer_pack") and (pack_size > 1 or isinstance(provider, GeminiCLIPackedVisionProvider))
     if pack_size > 1 and not is_packed:
         logging.warning(
             "pack_size=%d configured but provider %s has no infer_pack; falling back to single-frame.",
@@ -3044,6 +3264,7 @@ def infer_from_extract_index(
                             "timestamp_seconds": float(frame["timestamp_seconds"]),
                             "image_bytes": image_path.read_bytes(),
                             "image_path": image_path,
+                            "index_path": index_path,
                         })
                     should_abort_run = False
                     decisions: list[dict[str, Any]] = []
@@ -3895,6 +4116,24 @@ def command_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_status(args: argparse.Namespace) -> int:
+    configure_logging(args.log_level)
+    if getattr(args, "job", None):
+        job_path = Path(args.job).expanduser().resolve()
+    else:
+        config = load_pipeline_config(Path(args.config).expanduser())
+        video_path = Path(args.video).expanduser().resolve()
+        run_root = resolve_video_output_dir(config, getattr(args, "output_root", None), video_path) / "runs"
+        job_path = latest_background_job_manifest(run_root)
+
+    payload = load_status_payload(job_path)
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(format_status_summary(payload))
+    return 0
+
+
 def command_review(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
     config = load_pipeline_config(Path(args.config).expanduser())
@@ -4204,29 +4443,173 @@ def command_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def background_run_argv() -> list[str]:
+    argv = list(sys.argv[1:])
+    return [item for item in argv if item != "--background"]
+
+
+def update_background_job_manifest(manifest_path: Path, updates: dict[str, Any]) -> None:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        payload = {}
+    payload.update(json_compatible(updates))
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def latest_background_job_manifest(run_root: Path) -> Path:
+    candidates = [path for path in run_root.glob("*/job.json") if path.is_file()]
+    if not candidates:
+        raise FileNotFoundError(f"No background job manifests found under {run_root}")
+    return max(candidates, key=lambda path: (path.stat().st_mtime, path.as_posix()))
+
+
+def load_status_payload(job_path: Path) -> dict[str, Any]:
+    payload = json.loads(job_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Status payload must be a JSON object: {job_path}")
+    payload["job_path"] = str(job_path)
+    raw_artifact_dir = str(payload.get("artifact_dir", "") or "").strip()
+    raw_video = str(payload.get("video", "") or "").strip()
+    if raw_artifact_dir or raw_video:
+        artifact_dir = Path(raw_artifact_dir).expanduser().resolve() if raw_artifact_dir else video_artifact_dir(Path(raw_video).expanduser())
+        infer_progress = artifact_dir / "infer" / "infer.progress.json"
+        review_progress = artifact_dir / "review.progress.json"
+        if infer_progress.exists():
+            payload["infer_progress"] = json.loads(infer_progress.read_text(encoding="utf-8"))
+        if review_progress.exists():
+            payload["review_progress"] = json.loads(review_progress.read_text(encoding="utf-8"))
+    return payload
+
+
+def format_status_summary(payload: dict[str, Any]) -> str:
+    lines = [
+        f"job: {payload.get('job_path', '')}",
+        f"status: {payload.get('status', 'unknown')}",
+        f"pid: {payload.get('pid', '')}",
+    ]
+    if payload.get("exit_code") is not None:
+        lines.append(f"exit_code: {payload['exit_code']}")
+    if payload.get("video"):
+        lines.append(f"video: {payload['video']}")
+    infer_progress = payload.get("infer_progress")
+    if isinstance(infer_progress, dict):
+        lines.append(
+            "infer: "
+            f"{infer_progress.get('status', 'unknown')} "
+            f"{infer_progress.get('completed_candidate_frames', 0)}/"
+            f"{infer_progress.get('total_candidate_frames', 0)}"
+        )
+    review_progress = payload.get("review_progress")
+    if isinstance(review_progress, dict):
+        lines.append(
+            "review: "
+            f"{review_progress.get('status', 'unknown')} "
+            f"{review_progress.get('completed_variants', 0)}/"
+            f"{review_progress.get('total_variants', 0)}"
+        )
+    if payload.get("error"):
+        lines.append(f"error: {payload['error']}")
+    if payload.get("stdout"):
+        lines.append(f"stdout: {payload['stdout']}")
+    if payload.get("stderr"):
+        lines.append(f"stderr: {payload['stderr']}")
+    return "\n".join(lines)
+
+
+def launch_background_run(args: argparse.Namespace, config: dict[str, Any]) -> Path:
+    video_path = Path(args.video).expanduser().resolve()
+    run_root = resolve_video_output_dir(config, getattr(args, "output_root", None), video_path) / "runs"
+    run_id = datetime.now(timezone.utc).strftime("run_%Y%m%dT%H%M%SZ")
+    job_dir = run_root / run_id
+    suffix = 1
+    while job_dir.exists():
+        suffix += 1
+        job_dir = run_root / f"{run_id}_{suffix}"
+    job_dir.mkdir(parents=True, exist_ok=False)
+
+    command = [sys.executable, str(Path(__file__).resolve()), *background_run_argv()]
+    stdout_path = job_dir / "stdout.log"
+    stderr_path = job_dir / "stderr.log"
+    manifest_path = job_dir / "job.json"
+    manifest = {
+        "stage": "run.background",
+        "status": "starting",
+        "command": command,
+        "cwd": str(Path.cwd()),
+        "video": str(video_path),
+        "artifact_dir": str(run_root.parent),
+        "stdout": str(stdout_path),
+        "stderr": str(stderr_path),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    update_background_job_manifest(manifest_path, manifest)
+
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    child_env = os.environ.copy()
+    child_env["AIEDIT_BACKGROUND_JOB_MANIFEST"] = str(manifest_path)
+    child_env["AIEDIT_BACKGROUND_JOB_DIR"] = str(job_dir)
+    popen_kwargs: dict[str, Any] = {
+        "cwd": str(Path.cwd()),
+        "stdin": subprocess.DEVNULL,
+        "creationflags": creationflags,
+        "env": child_env,
+    }
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
+
+    with stdout_path.open("ab") as stdout_handle, stderr_path.open("ab") as stderr_handle:
+        process = subprocess.Popen(
+            command,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            **popen_kwargs,
+        )
+
+    update_background_job_manifest(manifest_path, {
+        "status": "started",
+        "pid": process.pid,
+    })
+    (job_dir / "pid").write_text(f"{process.pid}\n", encoding="utf-8")
+    logging.info("Started background run pid=%s", process.pid)
+    logging.info("Background run manifest: %s", manifest_path)
+    logging.info("Background stdout: %s", stdout_path)
+    logging.info("Background stderr: %s", stderr_path)
+    return manifest_path
+
+
 def command_run(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
     config = load_pipeline_config(Path(args.config).expanduser())
+    if bool(getattr(args, "background", False)):
+        launch_background_run(args, config)
+        return 0
+    apply_viral_run_defaults(args)
     input_path = Path(args.video).expanduser().resolve()
     videos = list_videos(input_path, config)
     if not videos:
         raise FileNotFoundError(f"No videos found in {input_path}")
 
     for video_path in videos:
-        video_output_dir = resolve_video_output_dir(config, args.output_root, video_path)
         video_args = argparse.Namespace(**vars(args))
         video_args.video = str(video_path)
 
-        command_extract(video_args)
-        command_infer(video_args)
-        index_path = (
-            Path(video_args.extract_index).expanduser().resolve()
-            if getattr(video_args, "extract_index", None)
-            else ensure_extract_index(video_args, config)
-        )
+        index_path = ensure_extract_index(video_args, config)
+        video_args.extract_index = str(index_path)
         stage_output_dir = resolve_video_dir_for_index(index_path)
+        analysis_path = stage_output_dir / "analysis.json"
+        if analysis_path.exists() and not bool(getattr(args, "restart", False)):
+            logging.info("Analysis already exists for %s, skipping infer: %s", video_path, analysis_path)
+        else:
+            command_infer(video_args)
+        if not analysis_path.exists():
+            raise FileNotFoundError(
+                f"Infer did not produce {analysis_path}. If using async submission, collect the batch before continuing run."
+            )
         temporal_args = argparse.Namespace(
-            input=str(stage_output_dir / "analysis.json"),
+            input=str(analysis_path),
             output_dir=str(stage_output_dir),
             top_k=5,
             window_seconds=3.0,
@@ -4239,11 +4622,11 @@ def command_run(args: argparse.Namespace) -> int:
         command_temporal(temporal_args)
 
         if bool(getattr(args, "skip_review", False)):
-            render_input = stage_output_dir / "analysis.json"
+            render_input = analysis_path
             command_render(argparse.Namespace(**vars(video_args), input=str(render_input), output_dir=str(stage_output_dir)))
         else:
             review_args = argparse.Namespace(**vars(video_args))
-            review_args.input = str(stage_output_dir / "analysis.json")
+            review_args.input = str(analysis_path)
             review_args.output_dir = str(stage_output_dir)
             review_settings = resolve_review_settings(config, review_args)
             review_stem = review_args.stem or default_stem(float(review_settings["target_seconds"]))
@@ -4309,8 +4692,7 @@ def command_edit_update_caption(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
-    args = parse_args()
+def dispatch_command(args: argparse.Namespace) -> int:
     if args.command == "extract":
         return command_extract(args)
     if args.command == "infer":
@@ -4319,6 +4701,8 @@ def main() -> int:
         return command_collect(args)
     if args.command == "cancel":
         return command_cancel(args)
+    if args.command == "status":
+        return command_status(args)
     if args.command == "review":
         return command_review(args)
     if args.command == "render":
@@ -4333,6 +4717,45 @@ def main() -> int:
         if args.edit_command == "update-caption":
             return command_edit_update_caption(args)
     raise ValueError(f"Unsupported command: {args.command}")
+
+
+def main() -> int:
+    args = parse_args()
+    background_manifest = str(os.environ.get("AIEDIT_BACKGROUND_JOB_MANIFEST", "")).strip()
+    if background_manifest and not bool(getattr(args, "background", False)):
+        manifest_path = Path(background_manifest).expanduser().resolve()
+        update_background_job_manifest(manifest_path, {
+            "status": "running",
+            "pid": os.getpid(),
+            "running_at": datetime.now(timezone.utc).isoformat(),
+        })
+        try:
+            exit_code = dispatch_command(args)
+        except KeyboardInterrupt:
+            update_background_job_manifest(manifest_path, {
+                "status": "interrupted",
+                "exit_code": 130,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error": "keyboard_interrupt",
+            })
+            raise
+        except Exception as exc:
+            update_background_job_manifest(manifest_path, {
+                "status": "failed",
+                "exit_code": 1,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error": summarize_provider_exception(exc),
+                "error_type": exc.__class__.__name__,
+            })
+            raise
+        update_background_job_manifest(manifest_path, {
+            "status": "completed" if exit_code == 0 else "failed",
+            "exit_code": exit_code,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return exit_code
+
+    return dispatch_command(args)
 
 
 if __name__ == "__main__":

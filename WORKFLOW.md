@@ -19,11 +19,24 @@ To generate multiple 30-second continuous highlight variants with a stronger sho
 ```bash
 python pipeline.py run \
   --video ./input/ride01.mp4 \
+  --viral \
   --selection-mode single_continuous \
   --top-highlights 5 \
   --prompt-preset douyin_riding \
   --caption-style douyin \
   --caption-detail-prefix "Hook: "
+```
+
+`--viral` fills in 30-second riding short-video defaults when the corresponding option was not explicitly supplied.
+
+Add `--background` to detach the same one-shot run. The launcher writes `job.json`, `pid`, `stdout.log`, and `stderr.log` under `.video_data/videos/<slug>/runs/<run_id>/`; the child process updates `job.json` as it moves through `running`, `completed`, `failed`, or `interrupted`.
+
+Re-running the same command without `--restart` reuses `extract/index.json`, skips infer when `analysis.json` already exists, and otherwise resumes sync infer from `infer/frame_decisions.checkpoint.jsonl`.
+
+Check the latest background run for a video with:
+
+```bash
+python pipeline.py status --video ./input/ride01.mp4
 ```
 
 ## Overview
@@ -109,6 +122,7 @@ Primary inputs:
 - `--api-key`
 - `--api-key-env`
 - `--model`
+- `--pack-size`
 - `--config`
 
 Examples:
@@ -117,7 +131,7 @@ Examples:
 python pipeline.py infer --video ./input/lap01.mp4 --config ./config.track.toml
 ```
 
-By default this prefers local Ollama, then Gemini 3 Flash, then Qwen, and finally a generic OpenAI-compatible API only if that provider is configured for vision support.
+By default this prefers local Ollama, then Gemini, then Qwen, and finally a generic OpenAI-compatible API only if that provider is configured for vision support. Gemini uses the official API when `GEMINI_API_KEY` is available; otherwise it can use the local `gemini` CLI packed path when the CLI is on `PATH`.
 
 For local development, the pipeline also loads a workspace `.env` file automatically. `GEMINI_BASE_URL` and `DEEPSEEK_BASE_URL` can override provider endpoints without editing TOML.
 
