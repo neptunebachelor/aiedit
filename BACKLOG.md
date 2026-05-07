@@ -53,6 +53,26 @@ Remaining work:
 - make collect/cancel generic instead of Gemini/Qwen-only
 - document verified providers versus opt-in user-verified endpoints
 
+### P1. Provider-aware packed image prompts for faster sync infer
+
+Why: single-frame sync infer is too slow on real footage. In one observed Gemini run on `VID_20260405_133154_006.mp4`, progress was about 141 / 691 frames after 26m42s, roughly 18s per frame. We need the sync path to send multiple frame images in one prompt whenever the selected provider/model can safely handle it.
+
+User requirement:
+
+- default to 8 images per prompt
+- dynamically adjust images-per-prompt by provider and model capability
+- read each model vendor's current documentation for context window, image limits, request-size limits, token accounting, and rate-limit behavior before setting defaults
+
+Remaining work:
+
+- add provider/model capability metadata for Gemini, Qwen, and generic OpenAI-compatible providers
+- implement packed sync requests for official API paths, not only Gemini CLI
+- choose pack size from documented limits, configured defaults, and optional CLI override, with `8` as the default target
+- preserve per-frame decisions in checkpoint and final `analysis.json` even when one prompt covers multiple images
+- add retry logic that splits a failed pack into smaller packs or single frames on context/request-size errors
+- record observed token/request usage when providers expose it, so future runs can tune pack size safely
+- update docs with the verified model IDs and pack-size guidance
+
 ### P2. Make provider auto-routing order configurable
 
 Why: current auto-routing is hard-coded as `local -> gemini -> qwen -> api`, which makes fallback policy a code edit instead of a config choice.
